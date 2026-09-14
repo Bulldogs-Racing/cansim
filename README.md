@@ -4,12 +4,15 @@ CAN-first simulator: visually build networks of simulated STM32 / Arduino /
 Teensy nodes, run firmware, and debug real CAN traffic. See `PROMPT.md` for
 the full product spec and `docs/` for developer documentation.
 
-> Status: **Phases 0–2 + headless Phase 3 + headless Phase 4** — deterministic CAN core
-> (frames, arbitration, virtual bus) with bit-level codec (CRC-15,
-> stuffing, SOF..EOF), ACK handling, TEC/REC confinement, bus-off, and
-> deterministic wire faults. `canlab simulate` runs virtual nodes without a GUI
-> and runs real STM32F103 firmware in Renode (`backend: renode`, all-renode
-> projects). The visual editor (Phase 5) is scaffolded, not yet implemented.
+> Status: **Phases 0–2 + headless Phase 3 + headless Phase 4 + GUI slice 1**
+> — deterministic CAN core (frames, arbitration, virtual bus) with bit-level
+> codec (CRC-15, stuffing, SOF..EOF), ACK handling, TEC/REC confinement,
+> bus-off, and deterministic wire faults. `canlab simulate` runs virtual
+> nodes without a GUI and runs real STM32F103 firmware in Renode
+> (`backend: renode`, all-renode projects). `canlab serve` exposes the
+> session over WebSocket; the React frontend renders the topology canvas,
+> runs scripted traffic, and shows a live CAN Analyzer. Topology editing
+> (drag-and-drop, save) is the next slice.
 
 ## Quickstart
 
@@ -26,9 +29,15 @@ More: `docs/getting-started.md`, `docs/architecture.md`, `docs/can-model.md`.
 canlab new my-project                  # scaffold portable project dir
 canlab simulate project.canlab         # headless run (virtual or Renode)
 canlab simulate renode.canlab --run-secs 30 --export-json events.json
+canlab serve --project project.canlab  # local WebSocket API for the GUI
 canlab validate project.canlab         # schema + safety checks
 canlab doctor                          # Renode / toolchains / SocketCAN
 ```
+
+GUI (new): `canlab serve` in one terminal, `npm run dev` in `frontend/` in
+another, open the Vite URL. Canvas visualizes the loaded project, ▶ Run
+executes scripted traffic, the CAN Analyzer polls live frames with filter,
+inspector, and CSV export.
 
 ## Layout
 

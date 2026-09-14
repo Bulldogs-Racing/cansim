@@ -3,6 +3,8 @@
 //! - `canlab new <name>` — scaffold a portable project directory (§48)
 //! - `canlab simulate <project>` — headless deterministic run, no GUI (§45)
 //! - `canlab validate <project>` — schema + safety checks (§21)
+//! - `canlab serve [--port N] [--project p]` — local WebSocket API for the
+//!   visual editor (§4); the GUI drives this, never the engine directly
 //! - `canlab doctor` — environment diagnostics (Renode, toolchains, SocketCAN)
 
 use cansimcan::can::bus::CanBusConfig;
@@ -47,6 +49,15 @@ enum Commands {
     },
     /// Validate a project file without simulating.
     Validate { project: PathBuf },
+    /// Serve the local WebSocket API for the visual editor.
+    Serve {
+        /// Loopback port to listen on.
+        #[arg(long, default_value_t = 21011)]
+        port: u16,
+        /// Project file to preload into the session.
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
     /// Diagnose the environment: Renode, toolchains, SocketCAN, …
     Doctor,
     /// Open a project in the visual editor (not implemented in this build).
@@ -63,6 +74,9 @@ fn main() {
             run_secs,
         } => cmd_simulate(&project, export_json.as_deref(), run_secs),
         Commands::Validate { project } => cmd_validate(&project),
+        Commands::Serve { port, project } => {
+            cansimcan::server::serve::serve(port, project.as_deref())
+        }
         Commands::Doctor => cmd_doctor(),
         Commands::Open { project } => {
             eprintln!(

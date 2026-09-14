@@ -45,13 +45,15 @@ src/can/          CAN core: id, frame, bus, arbitration, timing
 src/simulation/   SimClock, SimEvent log, headless Engine
 src/project/      versioned YAML project format + untrusted-input validation
 src/backends/     McuBackend seam (api) + Renode supervised runs (renode)
-src/main.rs       `canlab` CLI: new / simulate / validate / doctor / open
+src/server/       Session manager + JSON protocol + `canlab serve` (WebSocket)
+src/main.rs       `canlab` CLI: new / simulate / validate / doctor / open / serve
 tests/can_core.rs §74 acceptance tests (arbitration + delivery)
 tests/renode_backend.rs live Renode test (ignored by default, needs ELF + emulator)
+tests/ws_api.rs   WS contract test (real client ↔ server over loopback)
 examples/         runnable .canlab.yaml projects
 backends/renode/  REPL overlay, .resc scripts (checked-in spike scripts)
 firmware/tests/   bare-metal STM32F103 TX/RX fixtures + build.sh
-frontend/         Phase 5 shell (types + placeholder canvas)
+frontend/         React + React Flow editor shell: canvas, sim controls, analyzer
 docs/             user + developer documentation
 ```
 
@@ -62,5 +64,7 @@ docs/             user + developer documentation
 - [x] Phase 3 (headless part) — `canlab simulate` on virtual nodes
 - [x] Phase 2 — CRC, stuffing, ACK, error counters, bus-off (+ wire faults)
 - [x] Phase 4 (headless part) — Renode backend: real STM32F103 firmware runs
-- [ ] Phase 4 (interactive part) — pause/step/inspect for the server layer
-- [ ] Phase 5+ — visual editor, analyzer, MCP2515, Teensy, faults, FD, DBC
+- [x] Phase 5 (slice 1) — serve API + canvas view + run controls + analyzer
+- [ ] Phase 4 (interactive part) — Renode supervision over WS + debugger integration
+- [ ] Phase 5 (slice 2) — topology editing: palette, drag-and-drop, save
+- [ ] Phase 6+ — analyzer depth, MCP2515, Teensy, faults, FD, DBC

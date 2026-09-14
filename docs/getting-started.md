@@ -73,6 +73,24 @@ observed frames through the deterministic engine. Only `stm32f103` executes;
 other devices fail with an explicit error. See `docs/mcu-backends.md` for
 run semantics (`--run-secs` is a duration, not a failure timeout).
 
+## Run the visual editor
+
+Terminal 1 — API (from the repo root, so relative project paths resolve):
+
+```bash
+cargo run -q --bin canlab -- serve --project examples/two_nodes.canlab.yaml
+```
+
+Terminal 2 — GUI:
+
+```bash
+cd frontend && npm install && npm run dev
+```
+
+Open the printed Vite URL, press Connect, then ▶ Run. The canvas shows the
+loaded network, the analyzer streams frames (filter, click-to-inspect, CSV
+export). Protocol details: `docs/api.md`.
+
 ## Scaffold and validate a project
 
 ```bash

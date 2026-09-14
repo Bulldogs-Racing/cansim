@@ -13,4 +13,5 @@
 pub mod backends;
 pub mod can;
 pub mod project;
+pub mod server;
 pub mod simulation;

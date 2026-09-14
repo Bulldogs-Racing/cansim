@@ -100,8 +100,9 @@ impl CanFrame {
             .join(" ")
     }
 
-    /// Nominal frame length on the wire in bits, *excluding* bit stuffing
-    /// (stuffing-exact accounting arrives with the §10 bit model):
+    /// Nominal frame length on the wire in bits, *excluding* bit stuffing.
+    /// This is a planning estimate only; use
+    /// [`wire_len`](super::bits::wire_len) for the exact stuffed length.
     ///
     /// `SOF(1) + ID(11/29 + SRR/IDE extras) + control(6) + data(8*dlc)
     ///  + CRC(16) + ACK(2) + EOF(7) + IFS(3)`.
@@ -113,7 +114,9 @@ impl CanFrame {
         1 + id_bits + 6 + (self.dlc as usize * 8) + 16 + 2 + 7 + 3
     }
 
-    /// Nominal transmission time in nanoseconds at `bitrate_bit_s`.
+    /// Nominal transmission time in nanoseconds at `bitrate_bit_s`
+    /// (estimate; see [`wire_duration_ns`](super::bits::wire_duration_ns)
+    /// for the exact stuffed timing the engine steps).
     pub fn nominal_duration_ns(&self, bitrate_bit_s: u32) -> u64 {
         assert!(bitrate_bit_s > 0, "bitrate must be positive");
         self.nominal_bit_len() as u64 * 1_000_000_000 / bitrate_bit_s as u64

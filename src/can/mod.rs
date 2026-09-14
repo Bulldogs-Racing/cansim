@@ -27,10 +27,22 @@ pub mod timing;
 
 pub use arbitration::{arbitrate_ranking, arbitration_key, compare_frames};
 pub use bit::{push_value_msb, read_value_msb, to_bit_string, Bit};
+pub use bits::{
+    decode_frame, encode_frame, wire_duration_ns, wire_len, DecodeError, DecodeInfo, EncodedFrame,
+    EOF_LEN, IFS_LEN, TAIL_CRC_DELIM,
+};
 pub use bus::{
-    ArbitrationOutcome, BusEvent, BusEventKind, CanBus, CanBusConfig, TransmissionOutcome,
+    ArbitrationOutcome, BusError, BusEvent, BusEventKind, CanBus, CanBusConfig, FaultOutcome,
+    TransmissionOutcome, WireFault,
 };
 pub use crc::{crc15, crc_matches, crc_to_bits, CRC_LEN, CRC_MASK, CRC_POLY};
+pub use errors::{
+    kind_of_decode_error, CanErrorKind, ErrorFrame, ERROR_DELIMITER_LEN, ERROR_FLAG_LEN,
+};
 pub use frame::{CanFormat, CanFrame, CanFrameError};
 pub use id::{CanId, CanIdError};
+pub use state::{
+    Confinement, ControllerStatus, ErrorState, BUS_OFF_RECOVERY_SEQUENCES, BUS_OFF_THRESHOLD,
+    ERROR_PASSIVE_THRESHOLD,
+};
 pub use timing::SimNanos;

@@ -124,7 +124,7 @@ impl Engine {
     }
 
     /// Transmit one frame at the current clock time, then advance the clock
-    /// by the frame's nominal duration so scripted runs read naturally.
+    /// by the frame's exact wire duration so scripted runs read naturally.
     pub fn transmit(
         &mut self,
         bus: &str,
@@ -136,17 +136,14 @@ impl Engine {
             .buses
             .get_mut(bus)
             .ok_or_else(|| EngineError::UnknownBus(bus.into()))?;
-        let bitrate = b.bitrate();
+        let before = b.events().len();
         let outcome = b.transmit(sender, frame, t)?;
-        let n_events = b.events().len();
         // Mirror new bus events into the engine log.
-        let fresh: Vec<_> =
-            b.events()[n_events.saturating_sub(outcome.receivers.len() + 2)..].to_vec();
+        let fresh: Vec<_> = b.events()[before..].to_vec();
         for e in fresh {
             self.log.push(SimEvent::at(t, SimEventKind::BusTraffic(e)));
         }
-        self.clock
-            .advance(outcome.frame.nominal_duration_ns(bitrate));
+        self.clock.advance(b.frame_duration_ns(&outcome.frame));
         Ok(outcome)
     }
 
@@ -161,14 +158,13 @@ impl Engine {
             .buses
             .get_mut(bus)
             .ok_or_else(|| EngineError::UnknownBus(bus.into()))?;
-        let bitrate = b.bitrate();
         let before = b.events().len();
         let outcome = b.transmit_simultaneous(requests, t)?;
         for e in b.events()[before..].iter().cloned() {
             self.log.push(SimEvent::at(t, SimEventKind::BusTraffic(e)));
         }
         self.clock
-            .advance(outcome.winner_frame.nominal_duration_ns(bitrate));
+            .advance(b.frame_duration_ns(&outcome.winner_frame));
         Ok(outcome)
     }
 }

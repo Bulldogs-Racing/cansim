@@ -2,14 +2,31 @@
 //!
 //! PROMPT.md §7 requires the bus to register/unregister nodes, accept
 //! transmissions, perform arbitration, deliver winning frames, report
-//! arbitration losses, manage timing, expose observer events, and (later)
-//! support fault injection + bus state. This module implements the
-//! deterministic logical-frame core; error counters / bus-off (§12),
-//! CRC/stuffing (§10–§11), and fault injection (§35) build on the event
-//! stream without changing delivery semantics.
+//! arbitration losses, manage timing, expose observer events, and support
+//! fault injection and bus state. This module implements all of that at the
+//! logical-frame + wire-codec level:
+//!
+//! - Every transmission is encoded to wire bits ([`encode_frame`]) and
+//!   delivered only to controllers that are not bus-off.
+//! - With no eligible acknowledger the transmitter records an ACK error
+//!   (TEC += 8, subject to the passive-ACK parking exception); otherwise
+//!   sender and receivers log success (TEC/REC −= 1 rules).
+//! - [`CanBus::transmit_with_fault`] drives corrupted wire bits or drops
+//!   the frame deterministically — the bus-level fault hook that Phase 9
+//!   policies (probability, duration, affected node/frame) build on.
+//! - Per-controller [`ControllerStatus`] (TEC/REC/state) is queryable for
+//!   the §12 UI and the analyzer.
+//!
+//! Automatic retransmission after errors is intentionally *not* modelled
+//! yet: the outcome reports `acked`/`error` and the retry policy belongs
+//! to the controller layer (bxCAN/MCP2515/FlexCAN behaviour, later).
 
 use super::arbitration::arbitrate_ranking;
+use super::bit::Bit;
+use super::bits::{decode_frame, encode_frame, wire_duration_ns};
+use super::errors::{kind_of_decode_error, CanErrorKind};
 use super::frame::CanFrame;
+use super::state::{Confinement, ControllerStatus, ErrorState};
 use super::timing::SimNanos;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -21,6 +38,8 @@ pub enum BusError {
     DuplicateNode(String),
     #[error("unknown node \"{0}\" (not registered on this bus)")]
     UnknownNode(String),
+    #[error("node \"{0}\" is bus-off and cannot initiate transmission")]
+    NodeBusOff(String),
     #[error("bus name must not be empty")]
     EmptyBusName,
     #[error("bitrate must be positive, got {0}")]
@@ -29,6 +48,8 @@ pub enum BusError {
     EmptyArbitration,
     #[error("unknown arbitration node \"{0}\" (not registered on this bus)")]
     ArbitrationUnknownNode(String),
+    #[error("fault bit offset {offset} out of range for {len}-bit wire frame")]
+    FaultOffsetOutOfRange { offset: usize, len: usize },
     #[error("timestamps must be monotonic: got {got} ns after {last} ns")]
     NonMonotonicTimestamp { got: SimNanos, last: SimNanos },
 }
@@ -64,12 +85,43 @@ pub struct BusEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BusEventKind {
-    NodeRegistered { node: String },
-    NodeUnregistered { node: String },
-    ArbitrationStarted { contenders: Vec<String> },
-    ArbitrationLost { node: String, winner: String },
-    FrameTransmitted { sender: String, frame: CanFrame },
-    FrameReceived { receiver: String, frame: CanFrame },
+    NodeRegistered {
+        node: String,
+    },
+    NodeUnregistered {
+        node: String,
+    },
+    NodeReset {
+        node: String,
+    },
+    ArbitrationStarted {
+        contenders: Vec<String>,
+    },
+    ArbitrationLost {
+        node: String,
+        winner: String,
+    },
+    FrameTransmitted {
+        sender: String,
+        frame: CanFrame,
+    },
+    FrameReceived {
+        receiver: String,
+        frame: CanFrame,
+    },
+    CanError {
+        node: String,
+        kind: CanErrorKind,
+    },
+    ErrorStateChanged {
+        node: String,
+        state: ErrorState,
+    },
+    FrameDropped {
+        sender: String,
+        frame: CanFrame,
+        fault: WireFault,
+    },
 }
 
 impl BusEvent {
@@ -78,13 +130,33 @@ impl BusEvent {
     }
 }
 
+/// Deterministic wire fault driven by [`CanBus::transmit_with_fault`].
+///
+/// The bus-level hook for §35 fault injection: exact bit positions, no
+/// randomness. Probabilistic policies (probability/seed/duration) layer on
+/// top in Phase 9 by selecting offsets, never by changing these semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WireFault {
+    /// Flip the wire bit at `SOF..EOF` offset (0-based).
+    FlipBit(usize),
+    /// Flip a CRC-sequence bit (receivers always observe a CRC error).
+    CorruptCrc,
+    /// Drive nothing: the frame never reaches the bus.
+    DropFrame,
+}
+
 /// Outcome of a single (uncontended) transmission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransmissionOutcome {
     pub sender: String,
     pub frame: CanFrame,
-    /// All other registered nodes that observed the frame, sorted.
+    /// All registered, non-bus-off nodes (other than the sender) that
+    /// accepted the frame, sorted.
     pub receivers: Vec<String>,
+    /// `true` when at least one node acknowledged (no ACK error).
+    pub acked: bool,
+    /// Detection kind when the transmission errored, if any.
+    pub error: Option<CanErrorKind>,
     pub time_ns: SimNanos,
 }
 
@@ -97,14 +169,36 @@ pub struct ArbitrationOutcome {
     pub loser_nodes: Vec<String>,
     /// Nodes that observed the winning frame (everyone except the winner).
     pub receivers: Vec<String>,
+    pub acked: bool,
+    pub error: Option<CanErrorKind>,
     pub time_ns: SimNanos,
 }
 
-/// A deterministic logical-frame CAN bus.
+/// Outcome of a faulted transmission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaultOutcome {
+    pub sender: String,
+    pub frame: CanFrame,
+    pub fault: WireFault,
+    /// Detection kind observed on the wire (`None` for [`WireFault::DropFrame`]
+    /// and for the ACK-slot flip, which still decodes).
+    pub error: Option<CanErrorKind>,
+    pub receivers: Vec<String>,
+    pub time_ns: SimNanos,
+}
+
+/// Attachment state for one registered node.
+#[derive(Debug)]
+struct NodeAttachment {
+    confinement: Confinement,
+}
+
+/// A deterministic logical-frame CAN bus with wire-codec delivery and
+/// per-controller fault confinement.
 #[derive(Debug)]
 pub struct CanBus {
     config: CanBusConfig,
-    nodes: BTreeMap<String, ()>,
+    nodes: BTreeMap<String, NodeAttachment>,
     events: Vec<BusEvent>,
     last_time_ns: SimNanos,
     has_time: bool,
@@ -141,6 +235,14 @@ impl CanBus {
         self.nodes.contains_key(node)
     }
 
+    /// TEC/REC/state triple for one controller (§12 observability).
+    pub fn controller_status(&self, node: &str) -> Result<ControllerStatus, BusError> {
+        self.nodes
+            .get(node)
+            .map(|n| n.confinement.status())
+            .ok_or_else(|| BusError::UnknownNode(node.to_string()))
+    }
+
     pub fn events(&self) -> &[BusEvent] {
         &self.events
     }
@@ -162,7 +264,12 @@ impl CanBus {
             return Err(BusError::DuplicateNode(node));
         }
         self.check_time(at_ns)?;
-        self.nodes.insert(node.clone(), ());
+        self.nodes.insert(
+            node.clone(),
+            NodeAttachment {
+                confinement: Confinement::new(),
+            },
+        );
         self.events
             .push(BusEvent::at(at_ns, BusEventKind::NodeRegistered { node }));
         Ok(())
@@ -182,16 +289,59 @@ impl CanBus {
         Ok(())
     }
 
-    /// Transmit one frame from `sender` to every other registered node.
+    /// CPU-driven controller re-initialisation (clears TEC/REC and bus-off
+    /// recovery progress, mirroring e.g. FlexCAN re-init).
+    pub fn reset_node(&mut self, node: &str, at_ns: SimNanos) -> Result<(), BusError> {
+        if !self.nodes.contains_key(node) {
+            return Err(BusError::UnknownNode(node.to_string()));
+        }
+        self.check_time(at_ns)?;
+        self.nodes
+            .get_mut(node)
+            .expect("node exists")
+            .confinement
+            .reset();
+        self.events.push(BusEvent::at(
+            at_ns,
+            BusEventKind::NodeReset {
+                node: node.to_string(),
+            },
+        ));
+        Ok(())
+    }
+
+    /// Observe one 11-recessive-bit idle sequence on behalf of every
+    /// bus-off node (128 sequences recover a node to error-active).
+    pub fn note_idle_11(&mut self, at_ns: SimNanos) -> Result<(), BusError> {
+        self.check_time(at_ns)?;
+        let mut recovered = Vec::new();
+        for (name, attachment) in self.nodes.iter_mut() {
+            if attachment.confinement.note_idle_11() {
+                recovered.push(name.clone());
+            }
+        }
+        for node in recovered {
+            let state = self.nodes[&node].confinement.state();
+            self.events.push(BusEvent::at(
+                at_ns,
+                BusEventKind::ErrorStateChanged { node, state },
+            ));
+        }
+        Ok(())
+    }
+
+    /// Transmit one frame from `sender` to every other eligible node.
+    ///
+    /// The frame is wire-encoded; delivery requires at least one
+    /// non-bus-off acknowledger, otherwise the sender records an ACK error
+    /// and nothing is delivered (no automatic retry yet — see module docs).
     pub fn transmit(
         &mut self,
         sender: &str,
         frame: CanFrame,
         at_ns: SimNanos,
     ) -> Result<TransmissionOutcome, BusError> {
-        if !self.nodes.contains_key(sender) {
-            return Err(BusError::UnknownNode(sender.to_string()));
-        }
+        self.require_driver(sender)?;
         self.check_time(at_ns)?;
         self.events.push(BusEvent::at(
             at_ns,
@@ -206,13 +356,18 @@ impl CanBus {
                 frame: frame.clone(),
             },
         ));
-        let mut receivers: Vec<String> = self
-            .nodes
-            .keys()
-            .filter(|n| n.as_str() != sender)
-            .cloned()
-            .collect();
-        receivers.sort();
+        let receivers = self.eligible_receivers(sender);
+        if receivers.is_empty() {
+            self.record_tx_error(sender, CanErrorKind::Ack, at_ns);
+            return Ok(TransmissionOutcome {
+                sender: sender.to_string(),
+                frame,
+                receivers,
+                acked: false,
+                error: Some(CanErrorKind::Ack),
+                time_ns: at_ns,
+            });
+        }
         for rx in &receivers {
             self.events.push(BusEvent::at(
                 at_ns,
@@ -222,17 +377,23 @@ impl CanBus {
                 },
             ));
         }
+        self.record_tx_success(sender, &receivers, at_ns);
         Ok(TransmissionOutcome {
             sender: sender.to_string(),
             frame,
             receivers,
+            acked: true,
+            error: None,
             time_ns: at_ns,
         })
     }
 
     /// Resolve one round of simultaneous transmissions: the lowest-ID frame
-    /// wins (§8); losers get `ArbitrationLost` events and every other node
-    /// observes the winning frame.
+    /// wins (§8); losers get `ArbitrationLost` events and every other
+    /// eligible node observes the winning frame.
+    ///
+    /// Bus-off contenders drive nothing and are ignored (they cannot
+    /// initiate transmission); arbitration losses are not errors.
     pub fn transmit_simultaneous(
         &mut self,
         requests: Vec<(String, CanFrame)>,
@@ -248,20 +409,37 @@ impl CanBus {
         }
         self.check_time(at_ns)?;
 
-        let frames: Vec<CanFrame> = requests.iter().map(|(_, f)| f.clone()).collect();
+        let mut eligible: Vec<(String, CanFrame)> = Vec::with_capacity(requests.len());
+        let mut first_contender: Option<String> = None;
+        for (node, frame) in requests {
+            if first_contender.is_none() {
+                first_contender = Some(node.clone());
+            }
+            if self.driver_state(&node) != ErrorState::BusOff {
+                eligible.push((node, frame));
+            }
+        }
+        if eligible.is_empty() {
+            // Every contender is bus-off; none can drive the bus.
+            return Err(BusError::NodeBusOff(
+                first_contender.unwrap_or_else(|| String::from("<unknown>")),
+            ));
+        }
+
+        let frames: Vec<CanFrame> = eligible.iter().map(|(_, f)| f.clone()).collect();
         let (winner_idx, loser_idx) =
             arbitrate_ranking(&frames).expect("non-empty requests have a winner");
 
-        let contenders: Vec<String> = requests.iter().map(|(n, _)| n.clone()).collect();
+        let contenders: Vec<String> = eligible.iter().map(|(n, _)| n.clone()).collect();
         self.events.push(BusEvent::at(
             at_ns,
             BusEventKind::ArbitrationStarted { contenders },
         ));
 
-        let (winner_node, winner_frame) = requests[winner_idx].clone();
+        let (winner_node, winner_frame) = eligible[winner_idx].clone();
         let mut loser_nodes = Vec::with_capacity(loser_idx.len());
         for &i in &loser_idx {
-            let loser = requests[i].0.clone();
+            let loser = eligible[i].0.clone();
             self.events.push(BusEvent::at(
                 at_ns,
                 BusEventKind::ArbitrationLost {
@@ -279,13 +457,19 @@ impl CanBus {
                 frame: winner_frame.clone(),
             },
         ));
-        let mut receivers: Vec<String> = self
-            .nodes
-            .keys()
-            .filter(|n| n.as_str() != winner_node.as_str())
-            .cloned()
-            .collect();
-        receivers.sort();
+        let receivers = self.eligible_receivers(&winner_node);
+        if receivers.is_empty() {
+            self.record_tx_error(&winner_node, CanErrorKind::Ack, at_ns);
+            return Ok(ArbitrationOutcome {
+                winner_node,
+                winner_frame,
+                loser_nodes,
+                receivers,
+                acked: false,
+                error: Some(CanErrorKind::Ack),
+                time_ns: at_ns,
+            });
+        }
         for rx in &receivers {
             self.events.push(BusEvent::at(
                 at_ns,
@@ -295,14 +479,230 @@ impl CanBus {
                 },
             ));
         }
-
+        self.record_tx_success(&winner_node, &receivers, at_ns);
         Ok(ArbitrationOutcome {
             winner_node,
             winner_frame,
             loser_nodes,
             receivers,
+            acked: true,
+            error: None,
             time_ns: at_ns,
         })
+    }
+
+    /// Drive a deterministically corrupted (or dropped) frame: the bus-level
+    /// fault hook for §35. Receivers decode the corrupted wire; on any
+    /// decode failure every receiver records the detection (REC += 1) and
+    /// the sender records the transmission error (TEC += 8), and the frame
+    /// is discarded with no deliveries.
+    pub fn transmit_with_fault(
+        &mut self,
+        sender: &str,
+        frame: CanFrame,
+        fault: WireFault,
+        at_ns: SimNanos,
+    ) -> Result<FaultOutcome, BusError> {
+        self.require_driver(sender)?;
+        self.check_time(at_ns)?;
+
+        if fault == WireFault::DropFrame {
+            self.events.push(BusEvent::at(
+                at_ns,
+                BusEventKind::FrameDropped {
+                    sender: sender.to_string(),
+                    frame: frame.clone(),
+                    fault,
+                },
+            ));
+            return Ok(FaultOutcome {
+                sender: sender.to_string(),
+                frame,
+                fault,
+                error: None,
+                receivers: Vec::new(),
+                time_ns: at_ns,
+            });
+        }
+
+        let enc = encode_frame(&frame);
+        let mut wire = enc.wire.clone();
+        match fault {
+            WireFault::FlipBit(offset) => {
+                if offset >= wire.len() {
+                    return Err(BusError::FaultOffsetOutOfRange {
+                        offset,
+                        len: wire.len(),
+                    });
+                }
+                wire[offset] = wire[offset].flipped();
+            }
+            WireFault::CorruptCrc => {
+                // Flip the last CRC-sequence bit in the unstuffed stream and
+                // re-stuff, so receivers deterministically observe a CRC
+                // mismatch on otherwise well-formed framing.
+                let mut tail = enc.protected.clone();
+                let mut crc_bits = crate::can::crc::crc_to_bits(enc.crc);
+                let last = crc_bits.len() - 1;
+                crc_bits[last] = crc_bits[last].flipped();
+                tail.extend(crc_bits);
+                let mut stuffed = crate::can::stuffing::stuff(&tail);
+                stuffed.push(crate::can::bits::TAIL_CRC_DELIM);
+                stuffed.push(Bit::Recessive); // ACK slot as transmitted
+                stuffed.push(Bit::Recessive); // ACK delimiter
+                stuffed.extend(std::iter::repeat_n(
+                    Bit::Recessive,
+                    crate::can::bits::EOF_LEN,
+                ));
+                wire = stuffed;
+            }
+            WireFault::DropFrame => unreachable!("handled above"),
+        }
+
+        self.events.push(BusEvent::at(
+            at_ns,
+            BusEventKind::ArbitrationStarted {
+                contenders: vec![sender.to_string()],
+            },
+        ));
+        self.events.push(BusEvent::at(
+            at_ns,
+            BusEventKind::FrameTransmitted {
+                sender: sender.to_string(),
+                frame: frame.clone(),
+            },
+        ));
+
+        // The wire is identical for every receiver, so they all agree.
+        let kind = match decode_frame(&wire) {
+            Ok((_, _)) => None,
+            Err(e) => Some(kind_of_decode_error(&e)),
+        };
+        match kind {
+            None => {
+                let receivers = self.eligible_receivers(sender);
+                for rx in &receivers {
+                    self.events.push(BusEvent::at(
+                        at_ns,
+                        BusEventKind::FrameReceived {
+                            receiver: rx.clone(),
+                            frame: frame.clone(),
+                        },
+                    ));
+                }
+                self.record_tx_success(sender, &receivers, at_ns);
+                Ok(FaultOutcome {
+                    sender: sender.to_string(),
+                    frame,
+                    fault,
+                    error: None,
+                    receivers,
+                    time_ns: at_ns,
+                })
+            }
+            Some(kind) => {
+                self.record_tx_error(sender, kind, at_ns);
+                let receivers = self.eligible_receivers(sender);
+                for rx in &receivers {
+                    self.record_rx_error(rx, kind, at_ns);
+                }
+                Ok(FaultOutcome {
+                    sender: sender.to_string(),
+                    frame,
+                    fault,
+                    error: Some(kind),
+                    receivers: Vec::new(),
+                    time_ns: at_ns,
+                })
+            }
+        }
+    }
+
+    /// Exact stuffed-frame transmission time (plus inter-frame space).
+    pub fn frame_duration_ns(&self, frame: &CanFrame) -> u64 {
+        wire_duration_ns(frame, self.config.bitrate)
+    }
+
+    fn driver_state(&self, node: &str) -> ErrorState {
+        self.nodes
+            .get(node)
+            .map(|n| n.confinement.state())
+            .unwrap_or(ErrorState::Active)
+    }
+
+    /// Sender must be registered and able to drive (not bus-off).
+    fn require_driver(&self, sender: &str) -> Result<(), BusError> {
+        let attachment = self
+            .nodes
+            .get(sender)
+            .ok_or_else(|| BusError::UnknownNode(sender.to_string()))?;
+        if attachment.confinement.state() == ErrorState::BusOff {
+            return Err(BusError::NodeBusOff(sender.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Registered others, excluding bus-off controllers (which neither
+    /// receive nor acknowledge). Sorted for determinism.
+    fn eligible_receivers(&self, sender: &str) -> Vec<String> {
+        let mut receivers: Vec<String> = self
+            .nodes
+            .iter()
+            .filter(|(name, attachment)| {
+                name.as_str() != sender && attachment.confinement.state() != ErrorState::BusOff
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        receivers.sort();
+        receivers
+    }
+
+    fn record_tx_success(&mut self, sender: &str, receivers: &[String], at_ns: SimNanos) {
+        self.apply_confinement(sender, at_ns, |c| c.note_tx_success());
+        for rx in receivers {
+            self.apply_confinement(rx, at_ns, |c| c.note_rx_success());
+        }
+    }
+
+    fn record_tx_error(&mut self, sender: &str, kind: CanErrorKind, at_ns: SimNanos) {
+        self.events.push(BusEvent::at(
+            at_ns,
+            BusEventKind::CanError {
+                node: sender.to_string(),
+                kind,
+            },
+        ));
+        self.apply_confinement(sender, at_ns, |c| c.note_tx_error(kind));
+    }
+
+    fn record_rx_error(&mut self, receiver: &str, kind: CanErrorKind, at_ns: SimNanos) {
+        self.events.push(BusEvent::at(
+            at_ns,
+            BusEventKind::CanError {
+                node: receiver.to_string(),
+                kind,
+            },
+        ));
+        self.apply_confinement(receiver, at_ns, |c| c.note_rx_error());
+    }
+
+    fn apply_confinement(
+        &mut self,
+        node: &str,
+        at_ns: SimNanos,
+        update: impl FnOnce(&mut Confinement) -> ErrorState,
+    ) {
+        let before = self.nodes[node].confinement.state();
+        let after = update(&mut self.nodes.get_mut(node).expect("node exists").confinement);
+        if after != before {
+            self.events.push(BusEvent::at(
+                at_ns,
+                BusEventKind::ErrorStateChanged {
+                    node: node.to_string(),
+                    state: after,
+                },
+            ));
+        }
     }
 
     fn check_time(&mut self, at_ns: SimNanos) -> Result<(), BusError> {
@@ -328,6 +728,16 @@ mod tests {
         bus.register_node("a", 0).unwrap();
         bus.register_node("b", 0).unwrap();
         bus
+    }
+
+    fn solo() -> CanBus {
+        let mut bus = CanBus::new(CanBusConfig::new("solo_bus", 500_000).unwrap());
+        bus.register_node("only", 0).unwrap();
+        bus
+    }
+
+    fn frame_123() -> CanFrame {
+        CanFrame::new(CanId::new_standard(0x123).unwrap(), &[1, 2, 3, 4]).unwrap()
     }
 
     #[test]
@@ -358,6 +768,163 @@ mod tests {
         assert_eq!(
             bus.transmit("a", frame, 50),
             Err(BusError::NonMonotonicTimestamp { got: 50, last: 100 })
+        );
+    }
+
+    #[test]
+    fn successful_delivery_is_acked_with_zero_counters() {
+        let mut bus = bus2();
+        let out = bus.transmit("a", frame_123(), 0).unwrap();
+        assert!(out.acked);
+        assert_eq!(out.error, None);
+        assert_eq!(out.receivers, vec!["b".to_string()]);
+        assert_eq!(bus.controller_status("a").unwrap().tec, 0);
+        assert_eq!(bus.controller_status("b").unwrap().rec, 0);
+    }
+
+    #[test]
+    fn solo_transmission_is_an_ack_error() {
+        let mut bus = solo();
+        let out = bus.transmit("only", frame_123(), 0).unwrap();
+        assert!(!out.acked);
+        assert_eq!(out.error, Some(CanErrorKind::Ack));
+        assert!(out.receivers.is_empty());
+        assert_eq!(bus.controller_status("only").unwrap().tec, 8);
+        assert!(bus.events().iter().any(|e| matches!(
+            &e.kind,
+            BusEventKind::CanError { node, kind }
+            if node == "only" && *kind == CanErrorKind::Ack
+        )));
+    }
+
+    #[test]
+    fn lone_node_parks_at_error_passive() {
+        let mut bus = solo();
+        // 16 unacked frames → TEC 128 → passive; then parked by the
+        // passive-ACK exception: never bus-off on missing ACKs alone.
+        for i in 0..40 {
+            bus.transmit("only", frame_123(), i).unwrap();
+        }
+        let status = bus.controller_status("only").unwrap();
+        assert_eq!(status.tec, 128);
+        assert_eq!(status.state, ErrorState::Passive);
+    }
+
+    #[test]
+    fn corrupted_crc_is_observed_by_everyone() {
+        let mut bus = bus2();
+        let out = bus
+            .transmit_with_fault("a", frame_123(), WireFault::CorruptCrc, 0)
+            .unwrap();
+        assert_eq!(out.error, Some(CanErrorKind::Crc));
+        assert!(out.receivers.is_empty());
+        assert_eq!(bus.controller_status("a").unwrap().tec, 8);
+        assert_eq!(bus.controller_status("b").unwrap().rec, 1);
+    }
+
+    #[test]
+    fn flipped_data_bit_kills_delivery_and_counts() {
+        let mut bus = bus2();
+        let out = bus
+            .transmit_with_fault("a", frame_123(), WireFault::FlipBit(30), 0)
+            .unwrap();
+        assert!(out.error.is_some());
+        assert!(out.receivers.is_empty());
+        assert_eq!(bus.controller_status("a").unwrap().tec, 8);
+        assert_eq!(bus.controller_status("b").unwrap().rec, 1);
+    }
+
+    #[test]
+    fn dropped_frame_drives_nothing_and_counts_nothing() {
+        let mut bus = bus2();
+        let out = bus
+            .transmit_with_fault("a", frame_123(), WireFault::DropFrame, 0)
+            .unwrap();
+        assert_eq!(out.error, None);
+        assert!(out.receivers.is_empty());
+        assert_eq!(bus.controller_status("a").unwrap().tec, 0);
+        assert_eq!(bus.controller_status("b").unwrap().rec, 0);
+        assert!(bus
+            .events()
+            .iter()
+            .any(|e| matches!(&e.kind, BusEventKind::FrameDropped { .. })));
+    }
+
+    #[test]
+    fn fault_offset_out_of_range_is_explicit() {
+        let mut bus = bus2();
+        assert!(matches!(
+            bus.transmit_with_fault("a", frame_123(), WireFault::FlipBit(10_000), 0),
+            Err(BusError::FaultOffsetOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn bus_off_node_cannot_drive_and_is_excluded() {
+        let mut bus = bus2();
+        for i in 0..32u64 {
+            bus.transmit_with_fault("a", frame_123(), WireFault::CorruptCrc, i)
+                .unwrap();
+        }
+        assert_eq!(
+            bus.controller_status("a").unwrap().state,
+            ErrorState::BusOff
+        );
+        // Bus-off node cannot initiate...
+        assert_eq!(
+            bus.transmit("a", frame_123(), 32),
+            Err(BusError::NodeBusOff("a".into()))
+        );
+        // ...and observes nothing, not even as a receiver.
+        let out = bus.transmit("b", frame_123(), 33).unwrap();
+        assert!(!out.acked); // nobody left to acknowledge
+        assert!(out.receivers.is_empty());
+        // Recovery after 128 idle sequences.
+        for t in 34..(34 + 128) {
+            bus.note_idle_11(t).unwrap();
+        }
+        assert_eq!(
+            bus.controller_status("a").unwrap().state,
+            ErrorState::Active
+        );
+        let out = bus.transmit("a", frame_123(), 34 + 128).unwrap();
+        assert!(out.acked);
+    }
+
+    #[test]
+    fn state_transitions_emit_events() {
+        let mut bus = solo();
+        for i in 0..16u64 {
+            bus.transmit("only", frame_123(), i).unwrap();
+        }
+        assert!(bus.events().iter().any(|e| matches!(
+            &e.kind,
+            BusEventKind::ErrorStateChanged { ref node, state }
+            if node == "only" && *state == ErrorState::Passive
+        )));
+    }
+
+    #[test]
+    fn manual_reset_clears_bus_off() {
+        let mut bus = solo();
+        // Solo node parks at passive on ACKs; force bus-off via CRC faults
+        // observed... (solo faults still count TX side only: 32 × 8 = 256).
+        for i in 0..32u64 {
+            bus.transmit_with_fault("only", frame_123(), WireFault::CorruptCrc, i)
+                .unwrap();
+        }
+        assert_eq!(
+            bus.controller_status("only").unwrap().state,
+            ErrorState::BusOff
+        );
+        bus.reset_node("only", 32).unwrap();
+        assert_eq!(
+            bus.controller_status("only").unwrap(),
+            ControllerStatus {
+                tec: 0,
+                rec: 0,
+                state: ErrorState::Active
+            }
         );
     }
 }

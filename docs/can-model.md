@@ -23,20 +23,45 @@ oversized payloads fail at construction.
   and records `ArbitrationLost` for losers.
 - Timestamps are integer nanoseconds, monotonic per bus. The bus never
   reads the wall clock; determinism falls out of the design (§9).
-- Nominal frame duration = `nominal_bit_len × 1e9 / bitrate`, where
-  `nominal_bit_len` counts SOF/ID/control/data/CRC/ACK/EOF/IFS **without**
-  stuffing bits.
+- Frame duration is stuffing-exact: `(stuffed SOF..EOF bits + 3 IFS) /
+  bitrate` (`bits::wire_duration_ns`, the clock step the engine uses).
+  `CanFrame::nominal_*` remain as planning estimates only.
 
-## Protocol assumptions (to revisit with the §10 bit model)
+## Bit model (§10–§11)
 
-1. Raw DLC values 9..=15 are rejected (real hardware maps them to 8 data
-   bytes on the wire). A future bit-level decoder will map them; the frame
-   API stays strict for clarity.
-2. CRC/stuffing/ACK/error counters/bus-off (§11–§12) are **not modeled
-   yet**. The event stream (`BusEventKind`) is the extension point: error
-   frames and counter updates will be new variants, not delivery changes.
-3. The transceiver/physical layer (§64–§65: CANH/CANL, termination,
-   voltages) is deferred; the bus operates at the logical frame level.
+- `bits::encode_frame` / `decode_frame` implement the full `SOF … EOF`
+  layout for standard and extended data/remote frames; stuffing covers
+  `SOF` through the CRC sequence; CRC/ACK delimiters and EOF are
+  fixed-form; the ACK slot accepts either level and reports `acked`.
+- CRC-15 (`x^15+…+1`, `0x4599`, init 0) over destuffed `SOF … data`,
+  cross-validated against the `crc` crate catalogue implementation.
+- The decoder maps raw DLC nibbles 9–15 to 8 data bytes (ISO DLC table);
+  the encoder only emits 0–8. Reserved bits and SRR are accepted at
+  either level (real receivers ignore them).
+
+## Error handling (§12)
+
+- Detection kinds: bit, stuff, CRC, form, ACK (`CanErrorKind`); error
+  frames modelled as 6-bit flag + 8-recessive delimiter (`ErrorFrame`).
+- Per-controller TEC/REC with Active (≤127) / Passive (≥128) / BusOff
+  (TEC ≥ 256) states, exposed as `ControllerStatus` for the UI/analyzer.
+- Counting: TX error +8 (error-passive + pure ACK error parks, so a lone
+  node never ACKs itself bus-off), RX error +1, TX success −1, RX success
+  −1 (127 snap above 127). Bus-off recovers after 128×11 recessive bits
+  (`note_idle_11`) or CPU re-init (`reset_node`).
+- Bus-off controllers neither drive, receive, nor acknowledge. No
+  automatic retransmission yet — outcomes report `acked`/`error` and the
+  retry policy belongs to the controller layer.
+- `CanBus::transmit_with_fault` (`FlipBit` / `CorruptCrc` / `DropFrame`)
+  is the deterministic bus-level fault hook; probabilistic Phase 9
+  policies select offsets on top of it.
+
+## Deferred (documented, not silent)
+
+1. The +8 special cases around error/overload-flag bit sequences,
+   overload frames, and the error-passive TX-suspend delay.
+2. The transceiver/physical layer (§64–§65: CANH/CANL, termination,
+   voltages); the bus operates at the logical frame level.
 
 ## Event stream (§52–§53)
 

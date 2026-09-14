@@ -56,6 +56,6 @@ docs/             user + developer documentation
 - [x] Phase 0 — workspace, project format, docs, CI
 - [x] Phase 1 — CAN core + §74 tests
 - [x] Phase 3 (headless part) — `canlab simulate` on virtual nodes
-- [ ] Phase 2 — CRC, stuffing, ACK, error counters, bus-off
+- [x] Phase 2 — CRC, stuffing, ACK, error counters, bus-off (+ wire faults)
 - [ ] Phase 4 — Renode backend with real STM32 firmware
 - [ ] Phase 5+ — visual editor, analyzer, MCP2515, Teensy, faults, FD, DBC

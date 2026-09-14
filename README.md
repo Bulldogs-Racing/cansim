@@ -4,9 +4,10 @@ CAN-first simulator: visually build networks of simulated STM32 / Arduino /
 Teensy nodes, run firmware, and debug real CAN traffic. See `PROMPT.md` for
 the full product spec and `docs/` for developer documentation.
 
-> Status: **Phase 1 + headless Phase 3** — deterministic CAN core
-> (frames, arbitration, virtual bus) with `canlab simulate` running without
-> a GUI. Renode firmware execution (Phase 4) and the visual editor
+> Status: **Phases 0–2 + headless Phase 3** — deterministic CAN core
+> (frames, arbitration, virtual bus) with bit-level codec (CRC-15,
+> stuffing, SOF..EOF), ACK handling, TEC/REC confinement, bus-off, and
+> deterministic wire faults. `canlab simulate` runs without a GUI. Renode firmware execution (Phase 4) and the visual editor
 > (Phase 5) are scaffolded, not yet implemented.
 
 ## Quickstart

@@ -14,6 +14,7 @@
 
 pub mod arbitration;
 pub mod bit;
+pub mod bits;
 pub mod bus;
 pub mod crc;
 pub mod frame;

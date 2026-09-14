@@ -22,6 +22,8 @@ pub enum StuffError {
         polarity: &'static str,
         offset: usize,
     },
+    #[error("truncated stream: run of five ends at offset {offset} with no following stuff bit")]
+    MissingStuffBit { offset: usize },
 }
 
 /// Insert stuff bits into a destuffed protected stream (`SOF`..CRC sequence).
@@ -51,10 +53,10 @@ pub fn stuff(protected: &[Bit]) -> Vec<Bit> {
 
 /// Remove stuff bits, validating the 5-bit rule.
 ///
-/// Returns the destuffed stream, or [`StuffError`] on six consecutive equal
-/// bits. A trailing run of exactly five at the end of input is accepted —
-/// the matching stuff bit belongs to the following field, which the frame
-/// decoder (`bits.rs`) validates in context.
+/// Returns the destuffed stream, [`StuffError::TooManyConsecutive`] on six
+/// consecutive equal bits, or [`StuffError::MissingStuffBit`] when a run of
+/// five reaches the end of input with no following stuff bit (a complete
+/// transmitted region always carries its stuff bits).
 pub fn destuff(stuffed: &[Bit]) -> Result<Vec<Bit>, StuffError> {
     let mut out = Vec::with_capacity(stuffed.len());
     let mut run: usize = 0;
@@ -81,13 +83,14 @@ pub fn destuff(stuffed: &[Bit]) -> Result<Vec<Bit>, StuffError> {
         }
         out.push(bit);
         if run == STUFF_RUN {
-            // Next bit must be the opposite-polarity stuff bit; consume and
-            // skip it (but validate: same polarity here means 6-in-a-row,
-            // caught at the top of the next iteration — except at end of
-            // input, where the stuff bit lives in the next field).
-            if i + 1 < stuffed.len() {
-                let next = stuffed[i + 1];
-                if next == bit {
+            // Next bit must be the opposite-polarity stuff bit: consume and
+            // skip it (same polarity means 6-in-a-row; end of input means
+            // the region is truncated — both are errors here).
+            match stuffed.get(i + 1) {
+                None => {
+                    return Err(StuffError::MissingStuffBit { offset: i + 1 });
+                }
+                Some(next) if *next == bit => {
                     return Err(StuffError::TooManyConsecutive {
                         run: STUFF_RUN + 1,
                         polarity: if bit.is_dominant() {
@@ -98,9 +101,11 @@ pub fn destuff(stuffed: &[Bit]) -> Result<Vec<Bit>, StuffError> {
                         offset: i + 1,
                     });
                 }
-                i += 1; // skip stuff bit
-                last = Some(next);
-                run = 1;
+                Some(next) => {
+                    i += 1; // skip stuff bit
+                    last = Some(*next);
+                    run = 1;
+                }
             }
         }
         i += 1;
@@ -177,6 +182,13 @@ mod tests {
         assert!(destuff(&bits("000000")).is_err());
     }
 
+    #[test]
+    fn truncated_run_of_five_is_an_error() {
+        assert!(matches!(
+            destuff(&bits("10100000")),
+            Err(StuffError::MissingStuffBit { .. })
+        ));
+    }
     #[test]
     fn stuff_bit_count_matches_formula_spot_check() {
         // 8 dominant payload bits → one stuff bit after bit 5, then the

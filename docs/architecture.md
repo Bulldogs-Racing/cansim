@@ -66,5 +66,5 @@ docs/             user + developer documentation
 - [x] Phase 4 (headless part) — Renode backend: real STM32F103 firmware runs
 - [x] Phase 5 (slice 1) — serve API + canvas view + run controls + analyzer
 - [ ] Phase 4 (interactive part) — Renode supervision over WS + debugger integration
-- [ ] Phase 5 (slice 2) — topology editing: palette, drag-and-drop, save
+- [x] Phase 5 (slice 2) — topology editing: palette, drag-and-drop, save
 - [ ] Phase 6+ — analyzer depth, MCP2515, Teensy, faults, FD, DBC

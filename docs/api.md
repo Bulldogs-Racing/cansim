@@ -27,9 +27,32 @@ canlab serve --port 21011 [--project <file>]
 | `Step { deltaNs }` | `Stepped { nowNs, nextSeq }` | Advance simulated time without traffic. |
 | `Inject { sender, id, extended?, data? }` | `Injected { receivers, nextSeq }` | One ad-hoc frame now. |
 | `GetEvents { sinceSeq? }` | `Events { events, nextSeq }` | Ordered log; `seq` is the index. The analyzer polls this (~500 ms) and appends rows into a capped ring buffer. |
-| `GetStatus` | `Status` | state, projectPath, buses, nodes, nextSeq. |
+| `GetStatus` | `Status` | state, projectPath, buses, nodes, nextSeq, dirty. |
 | `GetProject` | `Project` | Full project document for the canvas. |
 | `Ping` | `Pong` | |
+| `NewProject` | `Status` | Blank unsaved canvas (projectPath null, dirty). |
+| `AddBus { id, bitrate }` | `Status` | Adds a `type: can` bus. |
+| `UpdateBus { id, bitrate }` | `Status` | Changes a bus bitrate. |
+| `RemoveBus { id }` | `Status` | Refused while nodes attach to it. |
+| `AddNode { node }` | `Status` | Full node declaration (`backend` must be `virtual` live). |
+| `UpdateNode { id, node }` | `Status` | Replaces a declaration (`node.id` must equal `id` — renames refused). Powers canvas edge-drag re-attach and the properties panel. |
+| `RemoveNode { id }` | `Status` | Refused while scripted `messages:` reference it. |
+| `SaveProject { path? }` | `Status` | Strict-validates, writes YAML (`path` = save-as), clears dirty. |
+
+## Editing semantics
+
+- Every successful edit rebuilds the engine from scratch, so the event log
+  restarts at `nextSeq: 0`. Clients adopt the cursor from the `Status`
+  reply and drop analyzer rows at or past it — the analyzer always shows
+  the current engine's log, never a mix of two topologies.
+- Edits are clone-mutate-rebuild-commit: failure leaves the session
+  untouched, and every refusal is an `Error` reply naming the fix
+  (duplicate id, bus in use, scripted message still referencing the node…).
+- Intermediate states may be incomplete (e.g. no buses yet) — strict
+  completeness is enforced by `SaveProject` (and `Load`), not by every
+  keystroke. `Start` on a nodeless project explains itself (`NoNodes`).
+- Canvas positions are view state only: they live in the frontend and are
+  never written to the project file.
 
 ## Event stream (§52–§53)
 

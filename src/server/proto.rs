@@ -9,7 +9,7 @@
 //! sync by hand until a generator earns its keep (field names are
 //! camelCase on the wire on both sides).
 
-use crate::project::Project;
+use crate::project::{NodeDecl, Project};
 use crate::simulation::engine::EngineState;
 use crate::simulation::event::{SimEvent, SimEventKind};
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,43 @@ pub enum ClientMsg {
     GetStatus,
     GetProject,
     Ping,
+    /// Blank unsaved canvas (replaces any loaded project).
+    NewProject,
+    /// Add a `type: can` bus. Rebuilds the engine; event log restarts.
+    AddBus {
+        id: String,
+        bitrate: u32,
+    },
+    /// Change a bus bitrate.
+    UpdateBus {
+        id: String,
+        bitrate: u32,
+    },
+    /// Remove a bus. Refused while nodes attach to it.
+    RemoveBus {
+        id: String,
+    },
+    /// Add a node (full declaration incl. `can.bus` attachment).
+    /// `backend` must be `virtual` — the live session does not supervise
+    /// firmware runs.
+    AddNode {
+        node: NodeDecl,
+    },
+    /// Replace a node's declaration (`node.id` must equal `id`; no renames).
+    UpdateNode {
+        id: String,
+        node: NodeDecl,
+    },
+    /// Remove a node. Refused while scripted `messages:` reference it.
+    RemoveNode {
+        id: String,
+    },
+    /// Validate strictly and write the project YAML. `path` overrides the
+    /// loaded path (save-as); without either there is nowhere to write.
+    SaveProject {
+        #[serde(default)]
+        path: Option<String>,
+    },
 }
 
 /// Server → client (camelCase wire contract — see [`ClientMsg`]).
@@ -68,6 +105,7 @@ pub enum ServerMsg {
         buses: Vec<String>,
         nodes: Vec<String>,
         nextSeq: usize,
+        dirty: bool,
     },
     Events {
         events: Vec<SeqEvent>,
@@ -158,6 +196,42 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"RunSummary\""));
         assert!(json.contains("\"nextSeq\":9"));
+    }
+
+    #[test]
+    fn edit_messages_round_trip() {
+        for msg in [
+            ClientMsg::NewProject,
+            ClientMsg::AddBus {
+                id: "b".into(),
+                bitrate: 500_000,
+            },
+            ClientMsg::UpdateBus {
+                id: "b".into(),
+                bitrate: 250_000,
+            },
+            ClientMsg::RemoveBus { id: "b".into() },
+            ClientMsg::RemoveNode { id: "n".into() },
+            ClientMsg::SaveProject { path: None },
+            ClientMsg::SaveProject {
+                path: Some("p.canlab".into()),
+            },
+        ] {
+            let json = serde_json::to_value(&msg).unwrap();
+            let back: ClientMsg = serde_json::from_value(json).unwrap();
+            assert_eq!(
+                serde_json::to_value(&back).unwrap()["type"],
+                serde_json::to_value(&msg).unwrap()["type"]
+            );
+        }
+        // NodeDecl serializes with its serde names; the GUI builds it raw.
+        let add: ClientMsg = serde_json::from_value(serde_json::json!({
+            "type": "AddNode",
+            "node": {"id": "n", "device": "stm32f103", "backend": "virtual",
+                      "can": {"bus": "b"}}
+        }))
+        .unwrap();
+        assert!(matches!(add, ClientMsg::AddNode { .. }));
     }
 
     #[test]

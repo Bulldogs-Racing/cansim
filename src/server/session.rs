@@ -14,6 +14,9 @@ use crate::can::bus::{BusError, CanBusConfig};
 use crate::can::frame::CanFrame;
 use crate::can::id::CanId;
 use crate::can::timing::SimNanos;
+use crate::project::schema::{BusDecl, NodeDecl};
+use crate::project::validation::KNOWN_BACKENDS;
+use crate::project::validation::KNOWN_DEVICES;
 use crate::project::{validate_project, Project};
 use crate::simulation::engine::{Engine, EngineError, EngineState};
 use crate::simulation::event::SimEvent;
@@ -38,6 +41,30 @@ pub enum SessionError {
     Engine(String),
     #[error("I/O error: {0}")]
     Io(String),
+    #[error("project has no nodes yet — add a bus and a node before running")]
+    NoNodes,
+    #[error("{0} id must not be empty")]
+    EmptyId(&'static str),
+    #[error("bus \"{0}\" already exists")]
+    DuplicateBus(String),
+    #[error("unknown bus \"{0}\" (buses: {1})")]
+    UnknownBus(String, String),
+    #[error("cannot remove bus \"{bus}\" — still used by node(s): {nodes}")]
+    BusInUse { bus: String, nodes: String },
+    #[error("node \"{0}\" already exists")]
+    DuplicateNode(String),
+    #[error("cannot remove node \"{node}\" — still referenced by {count} scripted message(s); delete them first")]
+    NodeHasMessages { node: String, count: usize },
+    #[error("node id mismatch: editing \"{expected}\" but the replacement declares \"{got}\" (renames are not supported)")]
+    IdMismatch { expected: String, got: String },
+    #[error("unknown device \"{device}\" (known: {known})")]
+    UnknownDevice { device: String, known: String },
+    #[error("unknown backend \"{backend}\" (known: {known})")]
+    UnknownBackend { backend: String, known: String },
+    #[error("backend \"{backend}\" is not supervised by the live API; use backend \"virtual\" here, or run this project headless: canlab simulate {path}")]
+    UnsupportedBackend { backend: String, path: String },
+    #[error("no path to save to — send SaveProject with a \"path\" first")]
+    NoSavePath,
 }
 
 impl From<EngineError> for SessionError {
@@ -60,12 +87,14 @@ pub struct RunSummary {
 }
 
 /// One loaded project: engine buses/nodes plus sender→bus routing for
-/// scripted and injected frames.
+/// scripted and injected frames. `path` is `None` for a never-saved blank
+/// canvas (`NewProject`); `dirty` tracks unsaved edits for the GUI chip.
 #[derive(Debug)]
 struct Loaded {
-    path: PathBuf,
+    path: Option<PathBuf>,
     project: Project,
     node_bus: HashMap<String, String>,
+    dirty: bool,
 }
 
 /// Authoritative simulation session. Not thread-safe itself — the server
@@ -90,7 +119,12 @@ impl Session {
     }
 
     pub fn project_path(&self) -> Option<&Path> {
-        self.loaded.as_ref().map(|l| l.path.as_path())
+        self.loaded.as_ref().and_then(|l| l.path.as_deref())
+    }
+
+    /// True when the in-memory project differs from what's on disk.
+    pub fn dirty(&self) -> bool {
+        self.loaded.as_ref().map(|l| l.dirty).unwrap_or(false)
     }
 
     pub fn project(&self) -> Option<&Project> {
@@ -123,37 +157,207 @@ impl Session {
         let base = path.parent().unwrap_or(Path::new("."));
         let rep = validate_project(&proj, base);
         if !rep.is_ok() {
-            let reasons = rep
-                .errors
-                .iter()
-                .map(|e| format!("[{}] {}", e.path, e.message))
-                .collect::<Vec<_>>()
-                .join("; ");
             return Err(SessionError::InvalidProject {
                 path: path.display().to_string(),
-                reasons,
+                reasons: flatten(&rep),
             });
         }
-        if proj.nodes.iter().any(|n| n.backend == "renode") {
-            return Err(SessionError::RenodeOverApi {
-                path: path.display().to_string(),
-            });
-        }
-        let mut engine = Engine::new();
-        for b in &proj.buses {
-            engine.add_bus(CanBusConfig::new(b.id.clone(), b.bitrate)?)?;
-        }
-        let mut node_bus = HashMap::new();
-        for n in &proj.nodes {
-            engine.register_node(&n.can.bus, &n.id)?;
-            node_bus.insert(n.id.clone(), n.can.bus.clone());
-        }
+        let (engine, node_bus) = build_engine(&proj, &path.display().to_string())?;
         self.engine = engine;
         self.loaded = Some(Loaded {
-            path: path.into(),
+            path: Some(path.into()),
             project: proj,
             node_bus,
+            dirty: false,
         });
+        Ok(())
+    }
+
+    /// Blank unsaved canvas: version 1, default simulation, no buses/nodes.
+    /// Deliberately unvalidated (an empty project is an editing state, not a
+    /// runnable one) — `start` refuses with [`SessionError::NoNodes`] and
+    /// `save` runs the full validator before writing.
+    pub fn new_project(&mut self) {
+        self.engine = Engine::new();
+        self.loaded = Some(Loaded {
+            path: None,
+            project: Project {
+                version: 1,
+                // NB: SimulationDecl::default() leaves mode empty, which
+                // validation rejects — a blank canvas still starts legal.
+                simulation: crate::project::SimulationDecl {
+                    mode: "deterministic".into(),
+                },
+                buses: Vec::new(),
+                nodes: Vec::new(),
+                messages: Vec::new(),
+            },
+            node_bus: HashMap::new(),
+            dirty: true,
+        });
+    }
+
+    pub fn add_bus(&mut self, id: &str, bitrate: u32) -> Result<(), SessionError> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Err(SessionError::EmptyId("bus"));
+        }
+        self.apply_edit(|ctx| {
+            let proj = &mut ctx.project;
+            if proj.buses.iter().any(|b| b.id == id) {
+                return Err(SessionError::DuplicateBus(id.into()));
+            }
+            proj.buses.push(BusDecl {
+                id: id.into(),
+                bus_type: "can".into(),
+                bitrate,
+                fd: false,
+            });
+            Ok(())
+        })
+    }
+
+    pub fn update_bus(&mut self, id: &str, bitrate: u32) -> Result<(), SessionError> {
+        self.apply_edit(|ctx| {
+            let proj = &mut ctx.project;
+            let known = bus_list(proj);
+            let bus = proj
+                .buses
+                .iter_mut()
+                .find(|b| b.id == id)
+                .ok_or_else(|| SessionError::UnknownBus(id.into(), known))?;
+            bus.bitrate = bitrate;
+            Ok(())
+        })
+    }
+
+    pub fn remove_bus(&mut self, id: &str) -> Result<(), SessionError> {
+        self.apply_edit(|ctx| {
+            let proj = &mut ctx.project;
+            if !proj.buses.iter().any(|b| b.id == id) {
+                return Err(SessionError::UnknownBus(id.into(), bus_list(proj)));
+            }
+            let users: Vec<String> = proj
+                .nodes
+                .iter()
+                .filter(|n| n.can.bus == id)
+                .map(|n| n.id.clone())
+                .collect();
+            if !users.is_empty() {
+                return Err(SessionError::BusInUse {
+                    bus: id.into(),
+                    nodes: users.join(", "),
+                });
+            }
+            proj.buses.retain(|b| b.id != id);
+            Ok(())
+        })
+    }
+
+    pub fn add_node(&mut self, mut node: NodeDecl) -> Result<(), SessionError> {
+        node.id = node.id.trim().to_string();
+        self.apply_edit(|ctx| {
+            check_node_decl(ctx.project, &node, None, &ctx.display)?;
+            ctx.project.nodes.push(node.clone());
+            Ok(())
+        })
+    }
+
+    pub fn update_node(&mut self, id: &str, mut node: NodeDecl) -> Result<(), SessionError> {
+        node.id = node.id.trim().to_string();
+        self.apply_edit(|ctx| {
+            if node.id != id {
+                return Err(SessionError::IdMismatch {
+                    expected: id.into(),
+                    got: node.id.clone(),
+                });
+            }
+            let pos = ctx
+                .project
+                .nodes
+                .iter()
+                .position(|n| n.id == id)
+                .ok_or_else(|| {
+                    SessionError::UnknownNode(id.into(), known_nodes_list(ctx.project))
+                })?;
+            check_node_decl(ctx.project, &node, Some(pos), &ctx.display)?;
+            ctx.project.nodes[pos] = node.clone();
+            Ok(())
+        })
+    }
+
+    pub fn remove_node(&mut self, id: &str) -> Result<(), SessionError> {
+        self.apply_edit(|ctx| {
+            let proj = &mut ctx.project;
+            if !proj.nodes.iter().any(|n| n.id == id) {
+                return Err(SessionError::UnknownNode(id.into(), known_nodes_list(proj)));
+            }
+            let refs = proj.messages.iter().filter(|m| m.sender == id).count();
+            if refs > 0 {
+                return Err(SessionError::NodeHasMessages {
+                    node: id.into(),
+                    count: refs,
+                });
+            }
+            proj.nodes.retain(|n| n.id != id);
+            Ok(())
+        })
+    }
+
+    /// Validate strictly, then write the project YAML. `path` overrides the
+    /// loaded path (save-as); without either there is nowhere to write.
+    pub fn save(&mut self, path: Option<&Path>) -> Result<(), SessionError> {
+        let loaded = self.loaded.as_mut().ok_or(SessionError::NoProject)?;
+        let target: PathBuf = match path {
+            Some(p) => p.into(),
+            None => loaded.path.clone().ok_or(SessionError::NoSavePath)?,
+        };
+        let base = target.parent().unwrap_or(Path::new("."));
+        let rep = validate_project(&loaded.project, base);
+        if !rep.is_ok() {
+            return Err(SessionError::InvalidProject {
+                path: target.display().to_string(),
+                reasons: flatten(&rep),
+            });
+        }
+        let yaml = loaded
+            .project
+            .to_yaml()
+            .map_err(|e| SessionError::Io(e.to_string()))?;
+        std::fs::write(&target, yaml).map_err(|e| SessionError::Io(e.to_string()))?;
+        // Firmware refs resolve against the project directory, which may
+        // have changed on save-as — rebuild so the engine matches the file.
+        let (engine, node_bus) = build_engine(&loaded.project, &target.display().to_string())?;
+        self.engine = engine;
+        loaded.path = Some(target);
+        loaded.node_bus = node_bus;
+        loaded.dirty = false;
+        Ok(())
+    }
+
+    /// Clone-mutate-rebuild-commit: an edit either lands fully (fresh engine,
+    /// empty event log, dirty flag) or leaves the session untouched.
+    fn apply_edit(
+        &mut self,
+        edit: impl FnOnce(&mut EditCtx<'_>) -> Result<(), SessionError>,
+    ) -> Result<(), SessionError> {
+        let loaded = self.loaded.as_ref().ok_or(SessionError::NoProject)?;
+        let display = loaded
+            .path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(unsaved)".into());
+        let mut next = loaded.project.clone();
+        edit(&mut EditCtx {
+            project: &mut next,
+            display: display.clone(),
+        })?;
+        let (engine, node_bus) = build_engine(&next, &display)?;
+        let loaded = self.loaded.as_mut().ok_or(SessionError::NoProject)?;
+        self.engine = engine;
+        loaded.project = next;
+        loaded.node_bus = node_bus;
+        loaded.dirty = true;
         Ok(())
     }
 
@@ -162,6 +366,9 @@ impl Session {
     /// runs. Deterministic: same project, same event log.
     pub fn start(&mut self) -> Result<RunSummary, SessionError> {
         let loaded = self.loaded.as_ref().ok_or(SessionError::NoProject)?;
+        if loaded.project.nodes.is_empty() {
+            return Err(SessionError::NoNodes);
+        }
         // Snapshot script + default sender/bus (borrow ends before &mut).
         let script: Vec<(String, String, CanFrame)> = if loaded.project.messages.is_empty() {
             let sender = loaded.project.nodes[0].id.clone();
@@ -271,14 +478,109 @@ impl Session {
     }
 }
 
-fn known_nodes(loaded: &Loaded) -> String {
-    loaded
-        .project
+/// Validate (file-load rules) and build a fresh engine for `proj`.
+/// Intermediate editing states (no buses/nodes yet) build an empty engine;
+/// strict completeness is enforced by `save`, not by every keystroke.
+fn build_engine(
+    proj: &Project,
+    display: &str,
+) -> Result<(Engine, HashMap<String, String>), SessionError> {
+    if proj.nodes.iter().any(|n| n.backend == "renode") {
+        return Err(SessionError::RenodeOverApi {
+            path: display.into(),
+        });
+    }
+    let mut engine = Engine::new();
+    for b in &proj.buses {
+        engine.add_bus(CanBusConfig::new(b.id.clone(), b.bitrate)?)?;
+    }
+    let mut node_bus = HashMap::new();
+    for n in &proj.nodes {
+        engine.register_node(&n.can.bus, &n.id)?;
+        node_bus.insert(n.id.clone(), n.can.bus.clone());
+    }
+    Ok((engine, node_bus))
+}
+
+fn flatten(rep: &crate::project::ValidationReport) -> String {
+    rep.errors
+        .iter()
+        .map(|e| format!("[{}] {}", e.path, e.message))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Scratch space for one validated edit: the candidate project plus the
+/// display path used in error messages.
+struct EditCtx<'a> {
+    project: &'a mut Project,
+    display: String,
+}
+
+/// Structural node checks shared by add/update: unique id (except the node
+/// being updated), known device, live-session backend, attached bus.
+fn check_node_decl(
+    proj: &Project,
+    node: &NodeDecl,
+    except: Option<usize>,
+    display: &str,
+) -> Result<(), SessionError> {
+    if node.id.is_empty() {
+        return Err(SessionError::EmptyId("node"));
+    }
+    if proj
         .nodes
+        .iter()
+        .enumerate()
+        .any(|(i, n)| n.id == node.id && Some(i) != except)
+    {
+        return Err(SessionError::DuplicateNode(node.id.clone()));
+    }
+    if !KNOWN_DEVICES.contains(&node.device.as_str()) {
+        return Err(SessionError::UnknownDevice {
+            device: node.device.clone(),
+            known: KNOWN_DEVICES.join(", "),
+        });
+    }
+    if node.backend == "renode" {
+        return Err(SessionError::UnsupportedBackend {
+            backend: node.backend.clone(),
+            path: display.into(),
+        });
+    }
+    if node.backend != "virtual" {
+        return Err(SessionError::UnknownBackend {
+            backend: node.backend.clone(),
+            known: KNOWN_BACKENDS.join(", "),
+        });
+    }
+    if !proj.buses.iter().any(|b| b.id == node.can.bus) {
+        return Err(SessionError::UnknownBus(
+            node.can.bus.clone(),
+            bus_list(proj),
+        ));
+    }
+    Ok(())
+}
+
+fn bus_list(proj: &Project) -> String {
+    proj.buses
+        .iter()
+        .map(|b| b.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn known_nodes_list(proj: &Project) -> String {
+    proj.nodes
         .iter()
         .map(|n| n.id.as_str())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn known_nodes(loaded: &Loaded) -> String {
+    known_nodes_list(&loaded.project)
 }
 
 impl Default for Session {
@@ -380,6 +682,128 @@ messages:
         assert!(t >= 1000);
         s.reset().unwrap();
         assert_eq!(s.state(), EngineState::Idle);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn node(id: &str, device: &str, bus: &str) -> NodeDecl {
+        NodeDecl {
+            id: id.into(),
+            device: device.into(),
+            backend: "virtual".into(),
+            firmware: None,
+            can: crate::project::CanAttachment { bus: bus.into() },
+            peripherals: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn edit_topology_rebuilds_and_tracks_dirty() {
+        let mut s = Session::new();
+        assert!(s.add_bus("b", 500_000).is_err()); // NoProject
+        s.new_project();
+        assert!(s.project_path().is_none());
+        assert!(s.dirty());
+        assert!(matches!(s.start(), Err(SessionError::NoNodes)));
+
+        s.add_bus("vehicle_bus", 500_000).unwrap();
+        assert!(matches!(
+            s.add_bus("vehicle_bus", 500_000),
+            Err(SessionError::DuplicateBus(_))
+        ));
+        assert!(matches!(
+            s.add_bus("  ", 500_000),
+            Err(SessionError::EmptyId(_))
+        ));
+        s.add_node(node("ecu", "stm32f103", "vehicle_bus")).unwrap();
+        assert!(matches!(
+            s.add_node(node("ecu", "arduino_uno", "vehicle_bus")),
+            Err(SessionError::DuplicateNode(_))
+        ));
+        assert!(matches!(
+            s.add_node(node("x", "toaster", "vehicle_bus")),
+            Err(SessionError::UnknownDevice { .. })
+        ));
+        assert!(matches!(
+            s.add_node(node("x", "stm32f103", "ghost_bus")),
+            Err(SessionError::UnknownBus(_, _))
+        ));
+        let mut renode = node("fw", "stm32f103", "vehicle_bus");
+        renode.backend = "renode".into();
+        assert!(matches!(
+            s.add_node(renode),
+            Err(SessionError::UnsupportedBackend { .. })
+        ));
+        // Failed edits leave the session untouched.
+        assert_eq!(s.project().unwrap().nodes.len(), 1);
+
+        s.update_bus("vehicle_bus", 250_000).unwrap();
+        assert_eq!(s.project().unwrap().buses[0].bitrate, 250_000);
+        assert!(matches!(
+            s.update_bus("ghost", 1),
+            Err(SessionError::UnknownBus(_, _))
+        ));
+        assert!(matches!(
+            s.update_bus("vehicle_bus", 0),
+            Err(SessionError::Engine(_))
+        ));
+
+        let mut moved = node("ecu", "arduino_uno", "vehicle_bus");
+        moved.firmware = Some("./firmware/ecu.bin".into());
+        s.update_node("ecu", moved).unwrap();
+        assert_eq!(s.project().unwrap().nodes[0].device, "arduino_uno");
+        assert!(matches!(
+            s.update_node("ecu", node("other", "stm32f103", "vehicle_bus")),
+            Err(SessionError::IdMismatch { .. })
+        ));
+
+        // Bus in use cannot go; node without messages can.
+        assert!(matches!(
+            s.remove_bus("vehicle_bus"),
+            Err(SessionError::BusInUse { .. })
+        ));
+        s.remove_node("ecu").unwrap();
+        s.remove_bus("vehicle_bus").unwrap();
+        assert!(s.project().unwrap().buses.is_empty());
+        assert!(s.dirty());
+
+        // Round trip through disk: save validates, clears dirty, reloads.
+        let dir = tmpdir("edit");
+        let target = dir.join("edited.canlab");
+        assert!(matches!(
+            s.save(Some(&target)),
+            Err(SessionError::InvalidProject { .. })
+        ));
+        s.add_bus("b", 125_000).unwrap();
+        s.add_node(node("n", "generic_can_node", "b")).unwrap();
+        s.save(Some(&target)).unwrap();
+        assert!(!s.dirty());
+        let text = std::fs::read_to_string(&target).unwrap();
+        let back = Project::parse(&text).unwrap();
+        assert_eq!(back, *s.project().unwrap());
+        let mut s2 = Session::new();
+        s2.load(&target).unwrap();
+        assert_eq!(s2.project().unwrap(), s.project().unwrap());
+        assert!(!s2.dirty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_node_with_messages_is_refused() {
+        let dir = tmpdir("msgs");
+        let path = write_project(&dir, "p.canlab", TWO_NODES);
+        let mut s = Session::new();
+        s.load(&path).unwrap();
+        assert!(!s.dirty());
+        match s.remove_node("engine_ecu") {
+            Err(SessionError::NodeHasMessages { node, count }) => {
+                assert_eq!(node, "engine_ecu");
+                assert_eq!(count, 1);
+            }
+            other => panic!("expected NodeHasMessages, got {other:?}"),
+        }
+        // ...but removing an unreferenced node works and dirties the session.
+        s.remove_node("dashboard").unwrap();
+        assert!(s.dirty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

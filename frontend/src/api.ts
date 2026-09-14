@@ -18,7 +18,15 @@ export type ClientMsg =
   | { type: "GetEvents"; sinceSeq?: number }
   | { type: "GetStatus" }
   | { type: "GetProject" }
-  | { type: "Ping" };
+  | { type: "Ping" }
+  | { type: "NewProject" }
+  | { type: "AddBus"; id: string; bitrate: number }
+  | { type: "UpdateBus"; id: string; bitrate: number }
+  | { type: "RemoveBus"; id: string }
+  | { type: "AddNode"; node: NodeDecl }
+  | { type: "UpdateNode"; id: string; node: NodeDecl }
+  | { type: "RemoveNode"; id: string }
+  | { type: "SaveProject"; path?: string | null };
 
 /** Wire shape of CanId (externally-tagged Rust enum). */
 export type WireCanId = { Standard: number } | { Extended: number };
@@ -57,10 +65,55 @@ export interface SeqEvent {
   kind: SimEventKind;
 }
 
+/** Project document shapes (mirror of src/project/schema.rs). */
+export interface ProjectBus {
+  id: string;
+  type: string;
+  bitrate: number;
+  fd: boolean;
+}
+
+export interface ProjectNode {
+  id: string;
+  device: string;
+  backend: string;
+  firmware?: string | null;
+  can: { bus: string };
+  peripherals?: unknown[];
+}
+
+export interface ProjectDoc {
+  version: number;
+  simulation: { mode: string };
+  buses: ProjectBus[];
+  nodes: ProjectNode[];
+  messages: unknown[];
+}
+
+/** Full node declaration as accepted by AddNode/UpdateNode. */
+export interface NodeDecl {
+  id: string;
+  device: string;
+  backend: string;
+  firmware?: string | null;
+  can: { bus: string };
+  peripherals?: unknown[];
+}
+
+/** Component library (§25): the palette offer. */
+export const KNOWN_DEVICES = [
+  "stm32f103",
+  "arduino_uno",
+  "teensy41",
+  "mcp2515",
+  "can_analyzer",
+  "generic_can_node",
+];
+
 export type ServerMsg =
-  | { type: "Status"; state: EngineState; projectPath: string | null; buses: string[]; nodes: string[]; nextSeq: number }
+  | { type: "Status"; state: EngineState; projectPath: string | null; buses: string[]; nodes: string[]; nextSeq: number; dirty: boolean }
   | { type: "Events"; events: SeqEvent[]; nextSeq: number }
-  | { type: "Project"; project: unknown }
+  | { type: "Project"; project: ProjectDoc }
   | { type: "RunSummary"; transmitted: number; received: number; nextSeq: number }
   | { type: "Stepped"; nowNs: number; nextSeq: number }
   | { type: "Injected"; receivers: number; nextSeq: number }

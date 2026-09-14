@@ -81,6 +81,14 @@ The GUI is a web app with three parts: a network **canvas**, run/simulation
 
 - **Canvas**: buses are shown as blue nodes, MCUs as dark nodes, with
   animated edges for connections.
+- **Editing**: the palette adds CAN buses and nodes (auto-named, attach to
+  the first bus). Click a bus/node for the properties panel (bitrate,
+  device, bus attachment, firmware path). Drag nodes to arrange; drag an
+  edge from a node onto another bus to re-attach it; Delete key removes the
+  selected node. **New** starts a blank canvas, **Save** writes the project
+  YAML to the path box (save-as included); the ● unsaved chip tracks dirty
+  state. Removing a bus in use or a node with scripted messages is refused
+  with the reason shown.
 - **CAN Analyzer**: streams TX/RX frames as they happen (Time, Dir, Node,
   ID, DLC, Data). Filter by ID or node, click a row to inspect the frame in
   the inspector, and **Export CSV** to save the trace. The table is capped

@@ -178,6 +178,31 @@ fn dispatch(session: &Arc<Mutex<Session>>, text: &str) -> ServerMsg {
                 nextSeq: log.len(),
             }
         }
+        ClientMsg::NewProject => {
+            s.new_project();
+            status_of(&s)
+        }
+        ClientMsg::AddBus { id, bitrate } => {
+            ok_or_error(s.add_bus(&id, bitrate).map(|()| status_of(&s)))
+        }
+        ClientMsg::UpdateBus { id, bitrate } => {
+            ok_or_error(s.update_bus(&id, bitrate).map(|()| status_of(&s)))
+        }
+        ClientMsg::RemoveBus { id } => ok_or_error(s.remove_bus(&id).map(|()| status_of(&s))),
+        ClientMsg::AddNode { node } => ok_or_error(s.add_node(node).map(|()| status_of(&s))),
+        ClientMsg::UpdateNode { id, node } => {
+            ok_or_error(s.update_node(&id, node).map(|()| status_of(&s)))
+        }
+        ClientMsg::RemoveNode { id } => ok_or_error(s.remove_node(&id).map(|()| status_of(&s))),
+        ClientMsg::SaveProject { path } => {
+            let target = path.as_deref().map(Path::new);
+            match s.save(target) {
+                Ok(()) => status_of(&s),
+                Err(e) => ServerMsg::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
         ClientMsg::GetStatus => status_of(&s),
         ClientMsg::GetProject => match s.project() {
             Some(p) => ServerMsg::Project { project: p.clone() },
@@ -208,5 +233,6 @@ fn status_of(s: &Session) -> ServerMsg {
         buses,
         nodes,
         nextSeq: s.events().len(),
+        dirty: s.dirty(),
     }
 }

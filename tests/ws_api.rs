@@ -115,3 +115,77 @@ fn ws_load_start_events_inject_reset() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn ws_edit_save_flow() {
+    let dir = std::env::temp_dir().join(format!("canlab-ws-edit-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("built.canlab");
+
+    let port = serve_ephemeral(Arc::new(Mutex::new(Session::new())));
+    let (mut ws, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}")).unwrap();
+
+    // Blank canvas: no path, dirty, cannot run yet.
+    let status = rpc(&mut ws, r#"{"type":"NewProject"}"#);
+    assert_eq!(status["type"], "Status");
+    assert_eq!(status["projectPath"], serde_json::Value::Null);
+    assert_eq!(status["dirty"], true);
+    assert_eq!(status["nextSeq"], 0);
+    assert_eq!(rpc(&mut ws, r#"{"type":"Start"}"#)["type"], "Error");
+
+    // Bus + node; duplicate bus is an Error, session untouched.
+    let status = rpc(&mut ws, r#"{"type":"AddBus","id":"b","bitrate":500000}"#);
+    assert_eq!(status["buses"], serde_json::json!(["b"]));
+    assert_eq!(status["nextSeq"], 0); // edit rebuilt the engine
+    let err = rpc(&mut ws, r#"{"type":"AddBus","id":"b","bitrate":500000}"#);
+    assert_eq!(err["type"], "Error");
+    let status = rpc(
+        &mut ws,
+        r#"{"type":"AddNode","node":{"id":"n","device":"stm32f103","backend":"virtual","can":{"bus":"b"}}}"#,
+    );
+    assert_eq!(status["nodes"], serde_json::json!(["n"]));
+    // Renode nodes are refused with a headless pointer.
+    let err = rpc(
+        &mut ws,
+        r#"{"type":"AddNode","node":{"id":"fw","device":"stm32f103","backend":"renode","can":{"bus":"b"}}}"#,
+    );
+    assert_eq!(err["type"], "Error");
+    assert!(err["message"].as_str().unwrap().contains("canlab simulate"));
+
+    // Rename via UpdateNode is refused; re-attach works via canvas drag.
+    let err = rpc(
+        &mut ws,
+        r#"{"type":"UpdateNode","id":"n","node":{"id":"m","device":"stm32f103","backend":"virtual","can":{"bus":"b"}}}"#,
+    );
+    assert_eq!(err["type"], "Error");
+    let status = rpc(
+        &mut ws,
+        r#"{"type":"UpdateNode","id":"n","node":{"id":"n","device":"arduino_uno","backend":"virtual","can":{"bus":"b"}}}"#,
+    );
+    assert_eq!(status["type"], "Status");
+    let proj = rpc(&mut ws, r#"{"type":"GetProject"}"#);
+    assert_eq!(proj["project"]["nodes"][0]["device"], "arduino_uno");
+
+    // Bus in use cannot go; saving validates and clears dirty.
+    let err = rpc(&mut ws, r#"{"type":"RemoveBus","id":"b"}"#);
+    assert_eq!(err["type"], "Error");
+    let req = serde_json::json!({"type": "SaveProject", "path": target.display().to_string()})
+        .to_string();
+    let status = rpc(&mut ws, &req);
+    assert_eq!(status["type"], "Status");
+    assert_eq!(status["dirty"], false);
+    assert_eq!(
+        status["projectPath"],
+        serde_json::json!(target.display().to_string())
+    );
+    let text = std::fs::read_to_string(&target).unwrap();
+    assert!(text.contains("arduino_uno"));
+
+    // Saved file reloads clean through a fresh Load.
+    let req = serde_json::json!({"type": "Load", "path": target.display().to_string()}).to_string();
+    let status = rpc(&mut ws, &req);
+    assert_eq!(status["nodes"], serde_json::json!(["n"]));
+    assert_eq!(status["dirty"], false);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

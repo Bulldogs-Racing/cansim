@@ -1,12 +1,25 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import ReactFlow, { Background, Controls, Edge, Node } from "reactflow";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import ReactFlow, {
+  applyNodeChanges,
+  Background,
+  Connection,
+  Controls,
+  Edge,
+  Node,
+  NodeChange,
+} from "reactflow";
 import "reactflow/dist/style.css";
 import {
   AnalyzerRow,
   analyzerRows,
   CanLabApi,
+  ClientMsg,
   EngineState,
   fmtTimeNs,
+  KNOWN_DEVICES,
+  NodeDecl,
+  ProjectBus,
+  ProjectNode,
   SeqEvent,
   ServerMsg,
 } from "./api";
@@ -14,62 +27,48 @@ import {
 const MAX_ROWS = 500; // ring buffer (§67): UI never grows without bound
 const WS_URL = "ws://127.0.0.1:21011";
 
-interface ProjectNode {
-  id: string;
-  device: string;
-  backend: string;
-  firmware?: string;
-  can: { bus: string };
-}
-
-interface ProjectBus {
-  id: string;
-  bitrate: number;
-}
-
-/** Layout: bus centered, MCU nodes fanned above/below it. */
-function toFlowNodes(buses: ProjectBus[], nodes: ProjectNode[]): { flowNodes: Node[]; edges: Edge[] } {
-  const flowNodes: Node[] = buses.map((b, i) => ({
-    id: `bus:${b.id}`,
-    type: "default",
-    position: { x: 260, y: i * 220 + 120 },
-    data: { label: `CAN BUS ${b.id}` },
-    style: { background: "#1d4ed8", color: "#fff", borderRadius: 8, padding: 10, width: 220, textAlign: "center" },
-  }));
-  nodes.forEach((n, i) => {
-    const side = i % 2 === 0 ? -1 : 1;
-    const row = Math.floor(i / 2);
-    flowNodes.push({
-      id: `node:${n.id}`,
-      type: "default",
-      position: { x: 260 + side * 320, y: row * 160 + 40 },
-      data: { label: `${n.id} · ${n.device}` },
-      style: { background: "#111827", color: "#e5e7eb", border: "1px solid #374151", borderRadius: 8, padding: 10, width: 200, textAlign: "center" },
-    });
-  });
-  const edges: Edge[] = nodes.map((n) => ({
-    id: `e:${n.id}->${n.can.bus}`,
-    source: `node:${n.id}`,
-    target: `bus:${n.can.bus}`,
-    animated: true,
-    style: { stroke: "#60a5fa" },
-  }));
-  return { flowNodes, edges };
-}
+type StatusMsg = Extract<ServerMsg, { type: "Status" }>;
 
 function replyError(reply: ServerMsg): string | null {
   return reply.type === "Error" ? reply.message : null;
 }
 
+function nextId(prefix: string, taken: string[]): string {
+  let i = 1;
+  while (taken.includes(`${prefix}-${i}`)) i++;
+  return `${prefix}-${i}`;
+}
+
+function parseFlowId(id: string): { kind: "bus" | "node"; name: string } | null {
+  if (id.startsWith("bus:")) return { kind: "bus", name: id.slice(4) };
+  if (id.startsWith("node:")) return { kind: "node", name: id.slice(5) };
+  return null;
+}
+
+/** Default canvas slots; real positions live in App and survive refreshes. */
+function defaultPos(kind: "bus" | "node", index: number): { x: number; y: number } {
+  if (kind === "bus") return { x: 260, y: index * 220 + 120 };
+  const side = index % 2 === 0 ? -1 : 1;
+  return { x: 260 + side * 320, y: Math.floor(index / 2) * 160 + 40 };
+}
+
+const BUS_STYLE: React.CSSProperties = { background: "#1d4ed8", color: "#fff", borderRadius: 8, padding: 10, width: 220, textAlign: "center" };
+const NODE_STYLE: React.CSSProperties = { background: "#111827", color: "#e5e7eb", border: "1px solid #374151", borderRadius: 8, padding: 10, width: 200, textAlign: "center" };
+
 export default function App(): JSX.Element {
   const apiRef = useRef<CanLabApi | null>(null);
   const cursorRef = useRef(0);
+  const positionsRef = useRef(new Map<string, { x: number; y: number }>());
   const [connected, setConnected] = useState(false);
   const [state, setState] = useState<EngineState>("idle");
+  const [dirty, setDirty] = useState(false);
   const [projectPath, setProjectPath] = useState("examples/two_nodes.canlab.yaml");
   const [loadedPath, setLoadedPath] = useState<string | null>(null);
   const [buses, setBuses] = useState<ProjectBus[]>([]);
   const [nodes, setNodes] = useState<ProjectNode[]>([]);
+  const [flowNodes, setFlowNodes] = useState<Node[]>([]);
+  const [flowEdges, setFlowEdges] = useState<Edge[]>([]);
+  const [canvasSel, setCanvasSel] = useState<string | null>(null);
   const [rows, setRows] = useState<AnalyzerRow[]>([]);
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState<AnalyzerRow | null>(null);
@@ -78,16 +77,76 @@ export default function App(): JSX.Element {
 
   const showError = useCallback((message: string) => setError(message), []);
 
+  /** Adopt a Status reply: engine state, dirty chip, and event cursor. Rows
+   *  past the cursor belong to a previous engine incarnation — drop them so
+   *  the analyzer always reflects the current log. */
+  const applyStatus = useCallback((reply: StatusMsg) => {
+    setState(reply.state);
+    setLoadedPath(reply.projectPath);
+    setDirty(reply.dirty);
+    cursorRef.current = reply.nextSeq;
+    setRows((prev) => prev.filter((r) => r.seq < reply.nextSeq));
+  }, []);
+
   const refreshStatus = useCallback(async (api: CanLabApi) => {
     const reply = await api.request({ type: "GetStatus" });
-    if (reply.type === "Status") {
-      setState(reply.state);
-      setLoadedPath(reply.projectPath);
-      cursorRef.current = reply.nextSeq;
-    } else if (reply.type === "Error") {
-      showError(reply.message);
+    if (reply.type === "Status") applyStatus(reply);
+    else if (reply.type === "Error") showError(reply.message);
+  }, [applyStatus, showError]);
+
+  /** Rebuild the canvas from the server project, keeping drag positions of
+   *  surviving ids and pruning positions of deleted ones. */
+  const refreshProject = useCallback(async (api: CanLabApi) => {
+    const reply = await api.request({ type: "GetProject" });
+    if (reply.type !== "Project") {
+      if (reply.type === "Error" && reply.message !== "no project loaded") showError(reply.message);
+      setBuses([]);
+      setNodes([]);
+      setFlowNodes([]);
+      setFlowEdges([]);
+      setCanvasSel(null);
+      return;
     }
+    const p = reply.project;
+    const pb = p.buses ?? [];
+    const pn = p.nodes ?? [];
+    setBuses(pb);
+    setNodes(pn);
+    const pos = positionsRef.current;
+    setFlowNodes([
+      ...pb.map((b, i) => ({
+        id: `bus:${b.id}`,
+        type: "default",
+        position: pos.get(`bus:${b.id}`) ?? defaultPos("bus", i),
+        data: { label: `CAN BUS ${b.id} · ${b.bitrate}` },
+        style: BUS_STYLE,
+      })),
+      ...pn.map((n, i) => ({
+        id: `node:${n.id}`,
+        type: "default",
+        position: pos.get(`node:${n.id}`) ?? defaultPos("node", i),
+        data: { label: `${n.id} · ${n.device}` },
+        style: NODE_STYLE,
+      })),
+    ]);
+    setFlowEdges(pn.map((n) => ({
+      id: `e:${n.id}->${n.can.bus}`,
+      source: `node:${n.id}`,
+      target: `bus:${n.can.bus}`,
+      deletable: false,
+      animated: true,
+      style: { stroke: "#60a5fa" },
+    })));
+    const alive = new Set([...pb.map((b) => `bus:${b.id}`), ...pn.map((n) => `node:${n.id}`)]);
+    for (const key of [...pos.keys()]) if (!alive.has(key)) pos.delete(key);
+    setCanvasSel((sel) => (sel && alive.has(sel) ? sel : null));
   }, [showError]);
+
+  // Remember drag positions so server refreshes don't snap nodes back.
+  useEffect(() => {
+    const pos = positionsRef.current;
+    flowNodes.forEach((n) => pos.set(n.id, n.position));
+  }, [flowNodes]);
 
   const pollEvents = useCallback(async () => {
     const api = apiRef.current;
@@ -123,12 +182,13 @@ export default function App(): JSX.Element {
       apiRef.current = api;
       setConnected(true);
       await refreshStatus(api);
+      await refreshProject(api); // picks up a --project preload, if any
     } catch (e) {
       showError(e instanceof Error ? e.message : String(e));
     }
-  }, [refreshStatus, showError]);
+  }, [refreshStatus, refreshProject, showError]);
 
-  const runCmd = useCallback(async (label: string, build: () => Parameters<CanLabApi["request"]>[0]) => {
+  const runCmd = useCallback(async (label: string, msg: ClientMsg) => {
     const api = apiRef.current;
     if (!api) {
       showError("not connected — press Connect first");
@@ -137,7 +197,7 @@ export default function App(): JSX.Element {
     setError(null);
     setSummary(null);
     try {
-      const reply = await api.request(build());
+      const reply = await api.request(msg);
       const err = replyError(reply);
       if (err) {
         showError(`${label}: ${err}`);
@@ -153,37 +213,109 @@ export default function App(): JSX.Element {
     }
   }, [pollEvents, refreshStatus, showError]);
 
-  const load = useCallback(async () => {
+  /** Topology/file edits: apply, adopt status, rebuild canvas. */
+  const editCmd = useCallback(async (label: string, msg: ClientMsg) => {
     const api = apiRef.current;
     if (!api) {
       showError("not connected — press Connect first");
       return;
     }
     setError(null);
+    setSummary(null);
     try {
-      const reply = await api.request({ type: "Load", path: projectPath });
+      const reply = await api.request(msg);
       const err = replyError(reply);
       if (err) {
-        showError(`Load: ${err}`);
+        showError(`${label}: ${err}`);
         return;
       }
-      const proj = await api.request({ type: "GetProject" });
-      if (proj.type === "Project") {
-        const p = proj.project as { buses: ProjectBus[]; nodes: ProjectNode[] };
-        setBuses(p.buses ?? []);
-        setNodes(p.nodes ?? []);
-      }
-      setRows([]);
-      setSelected(null);
-      cursorRef.current = 0;
-      await refreshStatus(api);
+      if (reply.type === "Status") applyStatus(reply);
+      await refreshProject(api);
     } catch (e) {
       showError(e instanceof Error ? e.message : String(e));
     }
-  }, [projectPath, refreshStatus, showError]);
+  }, [applyStatus, refreshProject, showError]);
 
-  const { flowNodes, edges } = useMemo(() => toFlowNodes(buses, nodes), [buses, nodes]);
-  const visibleRows = useMemo(() => {
+  const load = useCallback(() => editCmd("Load", { type: "Load", path: projectPath }), [editCmd, projectPath]);
+
+  const newProject = useCallback(() => {
+    if (!window.confirm("Discard the current session and start a blank project?")) return;
+    void editCmd("New", { type: "NewProject" });
+  }, [editCmd]);
+
+  const save = useCallback(() => {
+    if (!projectPath.trim()) {
+      showError("Save: enter a file path first (save-as)");
+      return;
+    }
+    void editCmd("Save", { type: "SaveProject", path: projectPath.trim() });
+  }, [editCmd, projectPath, showError]);
+
+  const addBus = useCallback(() => {
+    const taken = buses.map((b) => b.id);
+    void editCmd("AddBus", { type: "AddBus", id: nextId("bus", taken), bitrate: 500_000 });
+  }, [buses, editCmd]);
+
+  const addNode = useCallback((device: string) => {
+    if (buses.length === 0) {
+      showError("AddNode: add a CAN bus first, then drop nodes onto it");
+      return;
+    }
+    const decl: NodeDecl = {
+      id: nextId("node", nodes.map((n) => n.id)),
+      device,
+      backend: "virtual",
+      can: { bus: buses[0].id },
+    };
+    void editCmd("AddNode", { type: "AddNode", node: decl });
+  }, [buses, editCmd, nodes, showError]);
+
+  const removeFlowNode = useCallback((flowId: string) => {
+    const parsed = parseFlowId(flowId);
+    if (!parsed) return;
+    if (parsed.kind === "bus") void editCmd("RemoveBus", { type: "RemoveBus", id: parsed.name });
+    else void editCmd("RemoveNode", { type: "RemoveNode", id: parsed.name });
+  }, [editCmd]);
+
+  const onNodesChange = useCallback((changes: NodeChange[]) => {
+    const removed = changes.filter((c) => c.type === "remove");
+    if (removed.length > 0) {
+      removed.forEach((c) => {
+        if (c.type === "remove") removeFlowNode(c.id);
+      });
+    }
+    // Removal is server-driven: don't apply it locally, wait for refresh.
+    setFlowNodes((nds) => applyNodeChanges(changes.filter((c) => c.type !== "remove"), nds));
+  }, [removeFlowNode]);
+
+  /** Dragging an edge from a node onto a bus re-attaches it. */
+  const onConnect = useCallback((conn: Connection) => {
+    if (!conn.source || !conn.target) return;
+    const a = parseFlowId(conn.source);
+    const b = parseFlowId(conn.target);
+    if (!a || !b || a.kind === b.kind) {
+      showError("Connect: drag from a node onto a bus to attach it");
+      return;
+    }
+    const nodeName = a.kind === "node" ? a.name : b.name;
+    const busName = a.kind === "bus" ? a.name : b.name;
+    const decl = nodes.find((n) => n.id === nodeName);
+    if (!decl) {
+      showError(`Connect: unknown node "${nodeName}"`);
+      return;
+    }
+    const next: NodeDecl = {
+      id: decl.id,
+      device: decl.device,
+      backend: decl.backend,
+      firmware: decl.firmware ?? null,
+      can: { bus: busName },
+      peripherals: decl.peripherals ?? [],
+    };
+    void editCmd("Attach", { type: "UpdateNode", id: nodeName, node: next });
+  }, [editCmd, nodes, showError]);
+
+  const visibleRows = React.useMemo(() => {
     const f = filter.trim().toLowerCase();
     if (!f) return rows;
     return rows.filter((r) => r.id.toLowerCase().includes(f) || r.node.toLowerCase().includes(f));
@@ -200,6 +332,9 @@ export default function App(): JSX.Element {
   }, [rows]);
 
   const btn: React.CSSProperties = { padding: "6px 12px", borderRadius: 6, border: "1px solid #374151", background: "#1f2937", color: "#e5e7eb", cursor: "pointer" };
+  const selDecl = canvasSel ? parseFlowId(canvasSel) : null;
+  const selNode = selDecl?.kind === "node" ? nodes.find((n) => n.id === selDecl.name) : undefined;
+  const selBus = selDecl?.kind === "bus" ? buses.find((b) => b.id === selDecl.name) : undefined;
 
   return (
     <main style={{ fontFamily: "system-ui, sans-serif", background: "#030712", color: "#e5e7eb", minHeight: "100vh", padding: 16 }}>
@@ -208,18 +343,25 @@ export default function App(): JSX.Element {
         <span aria-label={`simulation ${state}`} style={{ padding: "2px 10px", borderRadius: 999, background: state === "running" ? "#14532d" : "#1f2937", border: "1px solid #374151" }}>
           ● {state}
         </span>
+        {connected && dirty && (
+          <span aria-label="unsaved changes" style={{ padding: "2px 10px", borderRadius: 999, background: "#713f12", border: "1px solid #a16207" }}>
+            ● unsaved
+          </span>
+        )}
         {!connected ? (
           <button style={btn} onClick={connect}>Connect</button>
         ) : (
           <>
-            <input aria-label="project file path" style={{ ...btn, minWidth: 320, cursor: "text" }} value={projectPath} onChange={(e) => setProjectPath(e.target.value)} />
+            <input aria-label="project file path" title="Load/Save path (server-side, relative to serve cwd)" style={{ ...btn, minWidth: 300, cursor: "text" }} value={projectPath} onChange={(e) => setProjectPath(e.target.value)} />
             <button style={btn} onClick={load}>Load</button>
-            <button style={btn} onClick={() => runCmd("Start", () => ({ type: "Start" }))}>▶ Run</button>
-            <button style={btn} onClick={() => runCmd("Pause", () => ({ type: "Pause" }))}>⏸ Pause</button>
-            <button style={btn} onClick={() => runCmd("Resume", () => ({ type: "Resume" }))}>Resume</button>
-            <button style={btn} onClick={() => runCmd("Stop", () => ({ type: "Stop" }))}>⏹ Stop</button>
-            <button style={btn} onClick={() => runCmd("Reset", () => ({ type: "Reset" }))}>↻ Reset</button>
-            <button style={btn} onClick={() => runCmd("Step", () => ({ type: "Step", deltaNs: 238_000 }))}>⏭ Step</button>
+            <button style={btn} onClick={newProject}>New</button>
+            <button style={btn} onClick={save}>Save</button>
+            <button style={btn} onClick={() => runCmd("Start", { type: "Start" })}>▶ Run</button>
+            <button style={btn} onClick={() => runCmd("Pause", { type: "Pause" })}>⏸ Pause</button>
+            <button style={btn} onClick={() => runCmd("Resume", { type: "Resume" })}>Resume</button>
+            <button style={btn} onClick={() => runCmd("Stop", { type: "Stop" })}>⏹ Stop</button>
+            <button style={btn} onClick={() => runCmd("Reset", { type: "Reset" })}>↻ Reset</button>
+            <button style={btn} onClick={() => runCmd("Step", { type: "Step", deltaNs: 238_000 })}>⏭ Step</button>
           </>
         )}
       </header>
@@ -230,18 +372,67 @@ export default function App(): JSX.Element {
         </div>
       )}
       {summary && <p style={{ color: "#86efac" }}>Run finished: {summary}.</p>}
-      {loadedPath && <p style={{ color: "#9ca3af" }}>Project: {loadedPath} · run <code>canlab serve</code> from the repo root so relative paths resolve.</p>}
+      {connected && flowNodes.length > 0 && (
+        <p style={{ color: "#9ca3af" }}>Project: {loadedPath ?? "(unsaved — enter a path and press Save)"} · paths resolve on the server, relative to the <code>canlab serve</code> cwd.</p>
+      )}
 
-      <section aria-label="network canvas" style={{ height: 380, background: "#0b1220", borderRadius: 12, border: "1px solid #1f2937", marginBottom: 12 }}>
-        {flowNodes.length === 0 ? (
-          <p style={{ padding: 16, color: "#9ca3af" }}>Connect, then Load a project to see its network topology. Editing (drag-and-drop, save) lands in the next slice.</p>
-        ) : (
-          <ReactFlow nodes={flowNodes} edges={edges} fitView>
-            <Background />
-            <Controls />
-          </ReactFlow>
-        )}
-      </section>
+      {connected && (
+        <section aria-label="component palette" style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+          <strong style={{ fontSize: 13 }}>Palette:</strong>
+          <button style={btn} onClick={addBus}>＋ CAN bus</button>
+          {KNOWN_DEVICES.map((d) => (
+            <button key={d} style={btn} onClick={() => addNode(d)}>＋ {d}</button>
+          ))}
+        </section>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "3fr 1fr", gap: 12, marginBottom: 12 }}>
+        <section aria-label="network canvas" style={{ height: 380, background: "#0b1220", borderRadius: 12, border: "1px solid #1f2937" }}>
+          {flowNodes.length === 0 ? (
+            <p style={{ padding: 16, color: "#9ca3af" }}>
+              {connected
+                ? "Blank canvas — add a CAN bus from the palette, then drop nodes onto it. Or Load a project file."
+                : "Press Connect, then Load a project — or start blank with New and build from the palette."}
+            </p>
+          ) : (
+            <ReactFlow
+              nodes={flowNodes}
+              edges={flowEdges}
+              onNodesChange={onNodesChange}
+              onConnect={onConnect}
+              onNodeClick={(_, n) => setCanvasSel(n.id)}
+              onPaneClick={() => setCanvasSel(null)}
+              deleteKeyCode={["Backspace", "Delete"]}
+              fitView
+            >
+              <Background />
+              <Controls />
+            </ReactFlow>
+          )}
+        </section>
+
+        <aside aria-label="properties" style={{ background: "#0b1220", borderRadius: 12, border: "1px solid #1f2937", padding: 12, fontSize: 13 }}>
+          <h2 style={{ margin: "0 0 8px", fontSize: 16 }}>Properties</h2>
+          {selNode ? (
+            <NodeProps
+              key={selNode.id}
+              node={selNode}
+              buses={buses}
+              onApply={(next) => editCmd("Update", { type: "UpdateNode", id: selNode.id, node: next })}
+              onDelete={() => removeFlowNode(`node:${selNode.id}`)}
+            />
+          ) : selBus ? (
+            <BusProps
+              key={selBus.id}
+              bus={selBus}
+              onApply={(bitrate) => editCmd("Update", { type: "UpdateBus", id: selBus.id, bitrate })}
+              onDelete={() => removeFlowNode(`bus:${selBus.id}`)}
+            />
+          ) : (
+            <p style={{ color: "#9ca3af" }}>Click a bus or node to edit it. Drag nodes to arrange; drag an edge onto another bus to re-attach. Delete key removes the selected node.</p>
+          )}
+        </aside>
+      </div>
 
       <section aria-label="can analyzer" style={{ background: "#0b1220", borderRadius: 12, border: "1px solid #1f2937", padding: 12 }}>
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
@@ -288,5 +479,72 @@ export default function App(): JSX.Element {
         </div>
       </section>
     </main>
+  );
+}
+
+function NodeProps({ node, buses, onApply, onDelete }: {
+  node: ProjectNode;
+  buses: ProjectBus[];
+  onApply: (next: NodeDecl) => void;
+  onDelete: () => void;
+}): JSX.Element {
+  const [device, setDevice] = useState(node.device);
+  const [firmware, setFirmware] = useState(node.firmware ?? "");
+  const [bus, setBus] = useState(node.can.bus);
+  const field: React.CSSProperties = { display: "block", width: "100%", boxSizing: "border-box", margin: "4px 0 10px", padding: 6, borderRadius: 6, border: "1px solid #374151", background: "#111827", color: "#e5e7eb" };
+  const btn: React.CSSProperties = { padding: "6px 12px", borderRadius: 6, border: "1px solid #374151", background: "#1f2937", color: "#e5e7eb", cursor: "pointer", marginRight: 8 };
+  return (
+    <div>
+      <p style={{ margin: "0 0 8px" }}><strong>{node.id}</strong> · backend virtual (live session runs virtual nodes only)</p>
+      <label>Device
+        <select style={field} value={device} onChange={(e) => setDevice(e.target.value)}>
+          {KNOWN_DEVICES.map((d) => <option key={d} value={d}>{d}</option>)}
+        </select>
+      </label>
+      <label>Bus
+        <select style={field} value={bus} onChange={(e) => setBus(e.target.value)}>
+          {buses.map((b) => <option key={b.id} value={b.id}>{b.id}</option>)}
+        </select>
+      </label>
+      <label>Firmware path (optional, server-relative)
+        <input style={field} value={firmware} placeholder="./firmware/node.bin" onChange={(e) => setFirmware(e.target.value)} />
+      </label>
+      <button style={btn} onClick={() => onApply({
+        id: node.id,
+        device,
+        backend: "virtual",
+        firmware: firmware.trim() ? firmware.trim() : null,
+        can: { bus },
+        peripherals: node.peripherals ?? [],
+      })}>Apply</button>
+      <button style={{ ...btn, borderColor: "#7f1d1d" }} onClick={onDelete}>Delete node</button>
+    </div>
+  );
+}
+
+function BusProps({ bus, onApply, onDelete }: {
+  bus: ProjectBus;
+  onApply: (bitrate: number) => void;
+  onDelete: () => void;
+}): JSX.Element {
+  const [bitrate, setBitrate] = useState(String(bus.bitrate));
+  const field: React.CSSProperties = { display: "block", width: "100%", boxSizing: "border-box", margin: "4px 0 10px", padding: 6, borderRadius: 6, border: "1px solid #374151", background: "#111827", color: "#e5e7eb" };
+  const btn: React.CSSProperties = { padding: "6px 12px", borderRadius: 6, border: "1px solid #374151", background: "#1f2937", color: "#e5e7eb", cursor: "pointer", marginRight: 8 };
+  return (
+    <div>
+      <p style={{ margin: "0 0 8px" }}><strong>{bus.id}</strong> · type can</p>
+      <label>Bitrate (bit/s)
+        <input style={field} inputMode="numeric" value={bitrate} onChange={(e) => setBitrate(e.target.value)} />
+      </label>
+      <button style={btn} onClick={() => {
+        const n = Number(bitrate);
+        if (!Number.isInteger(n) || n <= 0) {
+          alert("Bitrate must be a positive integer");
+          return;
+        }
+        onApply(n);
+      }}>Apply</button>
+      <button style={{ ...btn, borderColor: "#7f1d1d" }} onClick={onDelete}>Delete bus</button>
+    </div>
   );
 }

@@ -34,10 +34,61 @@ canlab validate project.canlab         # schema + safety checks
 canlab doctor                          # Renode / toolchains / SocketCAN
 ```
 
-GUI (new): `canlab serve` in one terminal, `npm run dev` in `frontend/` in
-another, open the Vite URL. Canvas visualizes the loaded project, ▶ Run
-executes scripted traffic, the CAN Analyzer polls live frames with filter,
-inspector, and CSV export.
+## GUI
+
+The GUI is a web app with three parts: a network **canvas**, run/simulation
+**controls**, and a live **CAN Analyzer**.
+
+### Prerequisites
+
+- Rust (build `canlab` via `cargo build`)
+- Node.js ≥ 18 (frontend dev server)
+
+### Run it
+
+1. **Start the API** from the repo root (relative project paths in the
+   project file resolve here):
+
+   ```bash
+   cargo run -q --bin canlab -- serve --project examples/two_nodes.canlab.yaml
+   ```
+
+   Expected output: `CanLab API serving on ws://127.0.0.1:21011`.
+   Keep this terminal open.
+
+2. **Start the frontend** in a second terminal:
+
+   ```bash
+   cd frontend
+   npm install      # first time only
+   npm run dev
+   ```
+
+   Vite prints a URL (e.g. `http://localhost:5173`). Open it in a browser.
+
+3. **Press Connect** (top-left). The status pill should change from `● idle`
+   to `● running` after you press **Run**.
+
+### Use it
+
+| Button | Does |
+|---|---|
+| **Load** | Loads/validates the project in the path box; renders the topology on the canvas |
+| **Run** | Executes the project's scripted traffic deterministically |
+| **Pause / Resume** | Halts / continues the simulation |
+| **Stop / Reset** | Ends the run or resets all nodes |
+| **Step** | Advances simulated time without traffic |
+
+- **Canvas**: buses are shown as blue nodes, MCUs as dark nodes, with
+  animated edges for connections.
+- **CAN Analyzer**: streams TX/RX frames as they happen (Time, Dir, Node,
+  ID, DLC, Data). Filter by ID or node, click a row to inspect the frame in
+  the inspector, and **Export CSV** to save the trace. The table is capped
+  at 500 rows.
+- The API repo note in-app always assumes `canlab serve` runs from the repo
+  root.
+
+Full protocol details: `docs/api.md`.
 
 ## Layout
 
@@ -61,3 +112,9 @@ docs/             architecture, CAN model, guides
 Keep the layering (§3): CAN core ← simulation ← backends ← API ←
 frontend. Small modules, tests before tricky protocol code, explicit
 `…NotSupported` errors instead of silent fakes.
+
+## License
+
+This software is distributed under the Beerware License (Revision 42). See
+`LICENSE`. In short: do whatever you want with it; if we ever meet and you
+think it was worth it, buy us a beer.

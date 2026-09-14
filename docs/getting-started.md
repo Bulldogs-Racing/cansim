@@ -8,6 +8,25 @@ real MCU firmware (via Renode) from Phase 4 on.
 - Rust 1.85+ (`cargo --version`)
 - Node.js 20+ (only for the Phase 5 frontend shell)
 
+## Local tools (`.tools/`, no root needed)
+
+Everything external lives in the gitignored `.tools/` directory —
+nothing is installed system-wide:
+
+```text
+.tools/
+├── renode -> <your Renode portable install>   # emulation backend (Phase 4)
+└── arm-gcc -> arm-gnu-toolchain-*/            # STM32 firmware builds
+```
+
+- **Renode**: unpack a `linux-*-portable` build and link it as
+  `.tools/renode` (the portable build embeds the dotnet runtime).
+- **ARM toolchain**: unpack an `aarch64`-hosted `arm-none-eabi` tarball
+  from ARM's GNU toolchain downloads and link it as `.tools/arm-gcc`
+  (14.2.rel1 verified: `arm-none-eabi-gcc -mcpu=cortex-m3` emits ARM ELF32).
+- Override the location with `CANLAB_TOOLS=/path/to/tools`.
+- Check the setup with `canlab doctor` (run from the repo root).
+
 ## Run your first headless simulation
 
 ```bash

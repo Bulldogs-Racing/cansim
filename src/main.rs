@@ -315,25 +315,97 @@ fn probe_binary(name: &str) -> Option<String> {
     None
 }
 
+/// Repo-local tool roots, in priority order: `$CANLAB_TOOLS`, then
+/// `./.tools` (i.e. run doctor from the repo root). Everything CanLab
+/// needs can live here with no root access and no system-wide installs.
+fn local_tool_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(dir) = std::env::var_os("CANLAB_TOOLS") {
+        roots.push(PathBuf::from(dir));
+    }
+    roots.push(PathBuf::from(".tools"));
+    roots
+}
+
+fn probe_local(rel: &str) -> Option<PathBuf> {
+    local_tool_roots()
+        .iter()
+        .map(|root| root.join(rel))
+        .find(|p| p.is_file())
+}
+
+/// Run `<tool> --version`, returning the first output line on success.
+fn tool_version(tool: &Path) -> Option<String> {
+    let out = std::process::Command::new(tool)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .map(str::to_string)
+}
+
+fn report_tool(label: &str, path_binary: Option<String>, local_rel: &str, purpose: &str) -> bool {
+    if let Some(p) = path_binary {
+        let ver = tool_version(Path::new(&p))
+            .map(|v| format!(" [{v}]"))
+            .unwrap_or_default();
+        println!("✓ {label} ({p}){ver}");
+        return true;
+    }
+    if let Some(p) = probe_local(local_rel) {
+        let ver = tool_version(&p)
+            .map(|v| format!(" [{v}]"))
+            .unwrap_or_default();
+        println!("✓ {label} (repo-local {}){ver}", p.display());
+        return true;
+    }
+    println!("✗ {label} not found ({purpose})");
+    false
+}
+
 fn cmd_doctor() -> i32 {
     println!("CanLab Doctor");
     println!();
     let mut ok = true;
 
     match probe_binary("renode") {
-        Some(p) => println!("✓ Renode ({p})"),
+        Some(p) => {
+            let ver = tool_version(Path::new(&p))
+                .map(|v| format!(" [{v}]"))
+                .unwrap_or_default();
+            println!("✓ Renode ({p}){ver}");
+        }
+        None if probe_local("renode/renode").is_some() => {
+            let p = probe_local("renode/renode").unwrap();
+            let ver = tool_version(&p)
+                .map(|v| format!(" [{v}]"))
+                .unwrap_or_default();
+            println!("✓ Renode (repo-local {}){ver}", p.display());
+        }
         None => {
-            println!("✗ Renode not found on PATH (needed for Phase 4 real-firmware runs)");
+            println!("✗ Renode not found on PATH or .tools/renode (needed for Phase 4 real-firmware runs)");
             ok = false;
         }
     }
-    for tool in ["arm-none-eabi-gcc", "avr-gcc"] {
-        match probe_binary(tool) {
-            Some(p) => println!("✓ {tool} ({p})"),
-            None => {
-                println!("✗ {tool} not found (needed to build {tool} firmware)");
-                ok = false;
-            }
+    if !report_tool(
+        "arm-none-eabi-gcc",
+        probe_binary("arm-none-eabi-gcc"),
+        "arm-gcc/bin/arm-none-eabi-gcc",
+        "needed to build STM32 firmware",
+    ) {
+        ok = false;
+    }
+    // AVR toolchain: Renode has no AVR core, so Arduino Uno firmware stays
+    // on virtual nodes for now (Phase 7 decision); report but don't fail.
+    match probe_binary("avr-gcc") {
+        Some(p) => println!("✓ avr-gcc ({p})"),
+        None => {
+            println!("- avr-gcc not found (optional; Arduino builds stay virtual until Phase 7)")
         }
     }
     if Path::new("/sys/class/net/can0").exists() || Path::new("/sys/class/net/vcan0").exists() {

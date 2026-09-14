@@ -38,6 +38,9 @@ canlab serve --port 21011 [--project <file>]
 | `UpdateNode { id, node }` | `Status` | Replaces a declaration (`node.id` must equal `id` — renames refused). Powers canvas edge-drag re-attach and the properties panel. |
 | `RemoveNode { id }` | `Status` | Refused while scripted `messages:` reference it. |
 | `SaveProject { path? }` | `Status` | Strict-validates, writes YAML (`path` = save-as), clears dirty. |
+| `AddMessage { message }` | `Status` | Appends a scripted frame (sender must exist; id range + DLC enforced). |
+| `UpdateMessage { index, message }` | `Status` | Replaces the frame at `index`. |
+| `RemoveMessage { index }` | `Status` | Deletes the frame at `index` (later rows shift — see `bugs.md`). |
 
 ## Editing semantics
 

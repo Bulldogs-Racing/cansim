@@ -203,6 +203,15 @@ fn dispatch(session: &Arc<Mutex<Session>>, text: &str) -> ServerMsg {
                 },
             }
         }
+        ClientMsg::AddMessage { message } => {
+            ok_or_error(s.add_message(message).map(|()| status_of(&s)))
+        }
+        ClientMsg::UpdateMessage { index, message } => {
+            ok_or_error(s.update_message(index, message).map(|()| status_of(&s)))
+        }
+        ClientMsg::RemoveMessage { index } => {
+            ok_or_error(s.remove_message(index).map(|()| status_of(&s)))
+        }
         ClientMsg::GetStatus => status_of(&s),
         ClientMsg::GetProject => match s.project() {
             Some(p) => ServerMsg::Project { project: p.clone() },

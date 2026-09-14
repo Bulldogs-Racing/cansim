@@ -187,5 +187,43 @@ fn ws_edit_save_flow() {
     assert_eq!(status["nodes"], serde_json::json!(["n"]));
     assert_eq!(status["dirty"], false);
 
+    // Scripted messages: add → runs → update → remove; bad frames refused.
+    let added = rpc(
+        &mut ws,
+        r#"{"type":"AddMessage","message":{"sender":"n","id":291,"data":[1,2]}}"#,
+    );
+    assert_eq!(added["type"], "Status");
+    assert_eq!(added["dirty"], true);
+    let err = rpc(
+        &mut ws,
+        r#"{"type":"AddMessage","message":{"sender":"ghost","id":1,"data":[]}}"#,
+    );
+    assert_eq!(err["type"], "Error");
+    let err = rpc(
+        &mut ws,
+        r#"{"type":"AddMessage","message":{"sender":"n","id":2048,"data":[]}}"#,
+    );
+    assert_eq!(err["type"], "Error");
+    let summary = rpc(&mut ws, r#"{"type":"Start"}"#);
+    assert_eq!(summary["transmitted"], 1);
+    let updated = rpc(
+        &mut ws,
+        r#"{"type":"UpdateMessage","index":0,"message":{"sender":"n","id":512,"data":[9]}}"#,
+    );
+    assert_eq!(updated["type"], "Status");
+    let proj = rpc(&mut ws, r#"{"type":"GetProject"}"#);
+    assert_eq!(proj["project"]["messages"][0]["id"], 512);
+    assert_eq!(
+        rpc(
+            &mut ws,
+            r#"{"type":"UpdateMessage","index":3,"message":{"sender":"n","id":1,"data":[]}}"#
+        )["type"],
+        "Error"
+    );
+    let removed = rpc(&mut ws, r#"{"type":"RemoveMessage","index":0}"#);
+    assert_eq!(removed["type"], "Status");
+    let proj = rpc(&mut ws, r#"{"type":"GetProject"}"#);
+    assert_eq!(proj["project"]["messages"].as_array().unwrap().len(), 0);
+
     let _ = std::fs::remove_dir_all(&dir);
 }

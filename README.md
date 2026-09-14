@@ -89,6 +89,11 @@ The GUI is a web app with three parts: a network **canvas**, run/simulation
   YAML to the path box (save-as included); the ● unsaved chip tracks dirty
   state. Removing a bus in use or a node with scripted messages is refused
   with the reason shown.
+- **Scripted traffic**: the panel below the canvas lists the frames Run
+  transmits in order — add frames (sender, hex id, hex bytes, extended
+  flag), delete rows. Form-level hex parsing catches typos inline;
+  server-side sender/range/DLC validation is the backstop. Removing a
+  node still referenced here is refused until its rows are deleted.
 - **CAN Analyzer**: streams TX/RX frames as they happen (Time, Dir, Node,
   ID, DLC, Data). Filter by ID or node, click a row to inspect the frame in
   the inspector, and **Export CSV** to save the trace. The table is capped

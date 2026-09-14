@@ -8,5 +8,7 @@
 pub mod schema;
 pub mod validation;
 
-pub use schema::{BusDecl, CanAttachment, NodeDecl, Project, ProjectError, SimulationDecl};
+pub use schema::{
+    BusDecl, CanAttachment, MessageDecl, NodeDecl, Project, ProjectError, SimulationDecl,
+};
 pub use validation::{validate_project, ValidationIssue, ValidationReport};

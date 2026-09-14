@@ -9,7 +9,7 @@
 //! sync by hand until a generator earns its keep (field names are
 //! camelCase on the wire on both sides).
 
-use crate::project::{NodeDecl, Project};
+use crate::project::{MessageDecl, NodeDecl, Project};
 use crate::simulation::engine::EngineState;
 use crate::simulation::event::{SimEvent, SimEventKind};
 use serde::{Deserialize, Serialize};
@@ -91,6 +91,21 @@ pub enum ClientMsg {
     SaveProject {
         #[serde(default)]
         path: Option<String>,
+    },
+    /// Append one scripted frame to `messages:` (sender must be a loaded
+    /// node; id range and DLC enforced like `validate_project`).
+    AddMessage {
+        message: MessageDecl,
+    },
+    /// Replace the scripted frame at `index` (shifts after deletes — see
+    /// bugs.md; refresh the list after every op).
+    UpdateMessage {
+        index: usize,
+        message: MessageDecl,
+    },
+    /// Delete the scripted frame at `index`.
+    RemoveMessage {
+        index: usize,
     },
 }
 
@@ -232,6 +247,29 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(add, ClientMsg::AddNode { .. }));
+    }
+
+    #[test]
+    fn message_ops_round_trip() {
+        let add = ClientMsg::AddMessage {
+            message: MessageDecl {
+                sender: "n".into(),
+                id: 0x123,
+                data: vec![1, 2],
+                extended: false,
+            },
+        };
+        let json = serde_json::to_value(&add).unwrap();
+        assert_eq!(json["type"], "AddMessage");
+        assert_eq!(json["message"]["sender"], "n");
+        let back: ClientMsg = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, ClientMsg::AddMessage { .. }));
+        for raw in [
+            r#"{"type":"UpdateMessage","index":2,"message":{"sender":"n","id":1,"data":[]}}"#,
+            r#"{"type":"RemoveMessage","index":0}"#,
+        ] {
+            assert!(parse_client_msg(raw).is_ok());
+        }
     }
 
     #[test]

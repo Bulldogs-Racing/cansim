@@ -14,7 +14,7 @@ use crate::can::bus::{BusError, CanBusConfig};
 use crate::can::frame::CanFrame;
 use crate::can::id::CanId;
 use crate::can::timing::SimNanos;
-use crate::project::schema::{BusDecl, NodeDecl};
+use crate::project::schema::{BusDecl, MessageDecl, NodeDecl};
 use crate::project::validation::KNOWN_BACKENDS;
 use crate::project::validation::KNOWN_DEVICES;
 use crate::project::{validate_project, Project};
@@ -65,6 +65,18 @@ pub enum SessionError {
     UnsupportedBackend { backend: String, path: String },
     #[error("no path to save to — send SaveProject with a \"path\" first")]
     NoSavePath,
+    #[error("unknown message index {index} (project has {count} scripted message(s))")]
+    UnknownMessage { index: usize, count: usize },
+    #[error("message sender \"{sender}\" is not a loaded node (nodes: {nodes})")]
+    MessageUnknownSender { sender: String, nodes: String },
+    #[error("message id {id:#X} out of range (max {max:#X} for {kind} ids)")]
+    MessageIdOutOfRange {
+        id: u32,
+        max: u32,
+        kind: &'static str,
+    },
+    #[error("message payload too long ({len} > 8 bytes)")]
+    MessagePayloadTooLong { len: usize },
 }
 
 impl From<EngineError> for SessionError {
@@ -300,6 +312,41 @@ impl Session {
                 });
             }
             proj.nodes.retain(|n| n.id != id);
+            Ok(())
+        })
+    }
+
+    pub fn add_message(&mut self, msg: MessageDecl) -> Result<(), SessionError> {
+        self.apply_edit(|ctx| {
+            check_message_decl(ctx.project, &msg)?;
+            ctx.project.messages.push(msg.clone());
+            Ok(())
+        })
+    }
+
+    pub fn update_message(&mut self, index: usize, msg: MessageDecl) -> Result<(), SessionError> {
+        self.apply_edit(|ctx| {
+            check_message_decl(ctx.project, &msg)?;
+            let count = ctx.project.messages.len();
+            let slot = ctx
+                .project
+                .messages
+                .get_mut(index)
+                .ok_or(SessionError::UnknownMessage { index, count })?;
+            *slot = msg.clone();
+            Ok(())
+        })
+    }
+
+    pub fn remove_message(&mut self, index: usize) -> Result<(), SessionError> {
+        self.apply_edit(|ctx| {
+            if index >= ctx.project.messages.len() {
+                return Err(SessionError::UnknownMessage {
+                    index,
+                    count: ctx.project.messages.len(),
+                });
+            }
+            ctx.project.messages.remove(index);
             Ok(())
         })
     }
@@ -563,6 +610,37 @@ fn check_node_decl(
     Ok(())
 }
 
+/// Scripted-traffic checks shared by add/update: sender must be a loaded
+/// node, id within standard/extended range, DLC ≤ 8. Mirrors the
+/// `messages:` rules in `validate_project` so edits fail fast with the same
+/// wording a later save would report.
+fn check_message_decl(proj: &Project, msg: &MessageDecl) -> Result<(), SessionError> {
+    if !proj.nodes.iter().any(|n| n.id == msg.sender) {
+        return Err(SessionError::MessageUnknownSender {
+            sender: msg.sender.clone(),
+            nodes: known_nodes_list(proj),
+        });
+    }
+    let (max, kind) = if msg.extended {
+        (0x1FFF_FFFF, "extended")
+    } else {
+        (0x7FF, "standard")
+    };
+    if msg.id > max {
+        return Err(SessionError::MessageIdOutOfRange {
+            id: msg.id,
+            max,
+            kind,
+        });
+    }
+    if msg.data.len() > 8 {
+        return Err(SessionError::MessagePayloadTooLong {
+            len: msg.data.len(),
+        });
+    }
+    Ok(())
+}
+
 fn bus_list(proj: &Project) -> String {
     proj.buses
         .iter()
@@ -805,6 +883,82 @@ messages:
         s.remove_node("dashboard").unwrap();
         assert!(s.dirty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn msg(sender: &str, id: u32, data: &[u8]) -> MessageDecl {
+        MessageDecl {
+            sender: sender.into(),
+            id,
+            data: data.to_vec(),
+            extended: false,
+        }
+    }
+
+    #[test]
+    fn message_crud_validates_like_save() {
+        let mut s = Session::new();
+        assert!(matches!(
+            s.add_message(msg("n", 1, &[])),
+            Err(SessionError::NoProject)
+        ));
+        s.new_project();
+        s.add_bus("b", 500_000).unwrap();
+        s.add_node(node("n", "stm32f103", "b")).unwrap();
+
+        s.add_message(msg("n", 0x123, &[1, 2])).unwrap();
+        assert_eq!(s.project().unwrap().messages.len(), 1);
+        assert!(s.dirty());
+
+        // Unknown sender, id range, DLC — same wording save would report.
+        assert!(matches!(
+            s.add_message(msg("ghost", 1, &[])),
+            Err(SessionError::MessageUnknownSender { .. })
+        ));
+        assert!(matches!(
+            s.add_message(msg("n", 0x800, &[])),
+            Err(SessionError::MessageIdOutOfRange { .. })
+        ));
+        assert!(matches!(
+            s.add_message(msg("n", 1, &[0; 9])),
+            Err(SessionError::MessagePayloadTooLong { .. })
+        ));
+        // Extended ids get the 29-bit ceiling.
+        let mut ext = msg("n", 0x1FFF_FFFF, &[]);
+        ext.extended = true;
+        s.add_message(ext).unwrap();
+        assert!(matches!(
+            s.add_message(MessageDecl {
+                sender: "n".into(),
+                id: 0x2000_0000,
+                data: vec![],
+                extended: true,
+            }),
+            Err(SessionError::MessageIdOutOfRange { .. })
+        ));
+        // Failed edits leave the list untouched.
+        assert_eq!(s.project().unwrap().messages.len(), 2);
+
+        s.update_message(0, msg("n", 0x200, &[9])).unwrap();
+        assert_eq!(s.project().unwrap().messages[0].id, 0x200);
+        assert!(matches!(
+            s.update_message(7, msg("n", 1, &[])),
+            Err(SessionError::UnknownMessage { .. })
+        ));
+        assert!(matches!(
+            s.update_message(0, msg("ghost", 1, &[])),
+            Err(SessionError::MessageUnknownSender { .. })
+        ));
+
+        s.remove_message(0).unwrap();
+        assert_eq!(s.project().unwrap().messages.len(), 1);
+        assert!(matches!(
+            s.remove_message(5),
+            Err(SessionError::UnknownMessage { .. })
+        ));
+
+        // Scripted traffic added in-app actually runs.
+        let summary = s.start().unwrap();
+        assert_eq!(summary.transmitted, 1);
     }
 
     #[test]

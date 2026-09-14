@@ -26,7 +26,10 @@ export type ClientMsg =
   | { type: "AddNode"; node: NodeDecl }
   | { type: "UpdateNode"; id: string; node: NodeDecl }
   | { type: "RemoveNode"; id: string }
-  | { type: "SaveProject"; path?: string | null };
+  | { type: "SaveProject"; path?: string | null }
+  | { type: "AddMessage"; message: MessageDecl }
+  | { type: "UpdateMessage"; index: number; message: MessageDecl }
+  | { type: "RemoveMessage"; index: number };
 
 /** Wire shape of CanId (externally-tagged Rust enum). */
 export type WireCanId = { Standard: number } | { Extended: number };
@@ -87,7 +90,15 @@ export interface ProjectDoc {
   simulation: { mode: string };
   buses: ProjectBus[];
   nodes: ProjectNode[];
-  messages: unknown[];
+  messages: MessageDecl[];
+}
+
+/** One scripted frame (mirror of MessageDecl in src/project/schema.rs). */
+export interface MessageDecl {
+  sender: string;
+  id: number;
+  data: number[];
+  extended?: boolean;
 }
 
 /** Full node declaration as accepted by AddNode/UpdateNode. */

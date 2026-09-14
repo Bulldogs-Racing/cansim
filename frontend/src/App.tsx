@@ -17,6 +17,7 @@ import {
   EngineState,
   fmtTimeNs,
   KNOWN_DEVICES,
+  MessageDecl,
   NodeDecl,
   ProjectBus,
   ProjectNode,
@@ -66,6 +67,7 @@ export default function App(): JSX.Element {
   const [loadedPath, setLoadedPath] = useState<string | null>(null);
   const [buses, setBuses] = useState<ProjectBus[]>([]);
   const [nodes, setNodes] = useState<ProjectNode[]>([]);
+  const [messages, setMessages] = useState<MessageDecl[]>([]);
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
   const [flowEdges, setFlowEdges] = useState<Edge[]>([]);
   const [canvasSel, setCanvasSel] = useState<string | null>(null);
@@ -102,6 +104,7 @@ export default function App(): JSX.Element {
       if (reply.type === "Error" && reply.message !== "no project loaded") showError(reply.message);
       setBuses([]);
       setNodes([]);
+      setMessages([]);
       setFlowNodes([]);
       setFlowEdges([]);
       setCanvasSel(null);
@@ -112,6 +115,7 @@ export default function App(): JSX.Element {
     const pn = p.nodes ?? [];
     setBuses(pb);
     setNodes(pn);
+    setMessages(p.messages ?? []);
     const pos = positionsRef.current;
     setFlowNodes([
       ...pb.map((b, i) => ({
@@ -434,6 +438,16 @@ export default function App(): JSX.Element {
         </aside>
       </div>
 
+      {connected && flowNodes.length > 0 && (
+        <MessagesPanel
+          key={nodes.map((n) => n.id).join(",")}
+          messages={messages}
+          nodes={nodes}
+          onAdd={(message) => editCmd("AddMessage", { type: "AddMessage", message })}
+          onRemove={(index) => editCmd("RemoveMessage", { type: "RemoveMessage", index })}
+        />
+      )}
+
       <section aria-label="can analyzer" style={{ background: "#0b1220", borderRadius: 12, border: "1px solid #1f2937", padding: 12 }}>
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
           <h2 style={{ margin: 0, fontSize: 16 }}>CAN Analyzer</h2>
@@ -479,6 +493,100 @@ export default function App(): JSX.Element {
         </div>
       </section>
     </main>
+  );
+}
+
+/** Scripted traffic editor: what Run transmits, in order. Add form parses
+ *  hex (`0x123` / `01 02`) and reports parse problems inline, before the
+ *  server ever sees them; server-side validation is the backstop. */
+function MessagesPanel({ messages, nodes, onAdd, onRemove }: {
+  messages: MessageDecl[];
+  nodes: ProjectNode[];
+  onAdd: (message: MessageDecl) => void;
+  onRemove: (index: number) => void;
+}): JSX.Element {
+  const [sender, setSender] = useState(nodes[0]?.id ?? "");
+  const [idText, setIdText] = useState("0x123");
+  const [dataText, setDataText] = useState("01 02 03 04");
+  const [extended, setExtended] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const field: React.CSSProperties = { padding: 6, borderRadius: 6, border: "1px solid #374151", background: "#111827", color: "#e5e7eb" };
+  const btn: React.CSSProperties = { padding: "6px 12px", borderRadius: 6, border: "1px solid #374151", background: "#1f2937", color: "#e5e7eb", cursor: "pointer" };
+
+  const submit = () => {
+    setFormError(null);
+    if (!sender) {
+      setFormError("pick a sending node first");
+      return;
+    }
+    const id = Number(idText.trim().toLowerCase().startsWith("0x") ? idText.trim() : `0x${idText.trim()}`);
+    if (!Number.isInteger(id) || id < 0) {
+      setFormError(`"${idText}" is not a hex frame id (e.g. 0x123)`);
+      return;
+    }
+    const max = extended ? 0x1fffffff : 0x7ff;
+    if (id > max) {
+      setFormError(`0x${id.toString(16).toUpperCase()} exceeds the ${extended ? "29-bit extended" : "11-bit standard"} range`);
+      return;
+    }
+    const parts = dataText.trim() === "" ? [] : dataText.trim().split(/[\s,]+/);
+    const data: number[] = [];
+    for (const p of parts) {
+      const b = Number(`0x${p}`);
+      if (!Number.isInteger(b) || b < 0 || b > 0xff) {
+        setFormError(`"${p}" is not a hex byte (00–FF, space separated)`);
+        return;
+      }
+      data.push(b);
+    }
+    if (data.length > 8) {
+      setFormError("Classical CAN carries at most 8 data bytes");
+      return;
+    }
+    onAdd({ sender, id, data, extended });
+  };
+
+  return (
+    <section aria-label="scripted messages" style={{ background: "#0b1220", borderRadius: 12, border: "1px solid #1f2937", padding: 12, marginBottom: 12 }}>
+      <h2 style={{ margin: "0 0 8px", fontSize: 16 }}>Scripted traffic ({messages.length})</h2>
+      <p style={{ margin: "0 0 8px", color: "#9ca3af", fontSize: 13 }}>
+        Frames Run transmits in order. Deleting a row shifts later indices (see bugs.md); the list refreshes after every op.
+      </p>
+      {messages.length > 0 && (
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, marginBottom: 8 }}>
+          <thead>
+            <tr style={{ textAlign: "left", color: "#9ca3af" }}>
+              <th>#</th><th>Sender</th><th>ID</th><th>DLC</th><th>Data</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {messages.map((m, i) => (
+              <tr key={i}>
+                <td>{i}</td>
+                <td>{m.sender}</td>
+                <td style={{ fontFamily: "monospace" }}>0x{m.id.toString(16).toUpperCase()}{m.extended ? " (ext)" : ""}</td>
+                <td>{m.data.length}</td>
+                <td style={{ fontFamily: "monospace" }}>{m.data.map((b) => b.toString(16).toUpperCase().padStart(2, "0")).join(" ") || "(empty)"}</td>
+                <td><button style={btn} onClick={() => onRemove(i)}>Delete</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <select aria-label="sending node" style={field} value={sender} onChange={(e) => setSender(e.target.value)}>
+          {nodes.length === 0 && <option value="">(add a node first)</option>}
+          {nodes.map((n) => <option key={n.id} value={n.id}>{n.id}</option>)}
+        </select>
+        <input aria-label="frame id in hex" title="hex frame id, e.g. 0x123" style={{ ...field, width: 90 }} value={idText} onChange={(e) => setIdText(e.target.value)} />
+        <input aria-label="data bytes in hex" title="space-separated hex bytes, e.g. 01 02 03 04" style={{ ...field, minWidth: 200 }} value={dataText} onChange={(e) => setDataText(e.target.value)} />
+        <label style={{ fontSize: 13 }}>
+          <input type="checkbox" checked={extended} onChange={(e) => setExtended(e.target.checked)} /> extended
+        </label>
+        <button style={btn} onClick={submit}>＋ Add frame</button>
+      </div>
+      {formError && <p role="alert" style={{ color: "#fca5a5", margin: "8px 0 0" }}>{formError}</p>}
+    </section>
   );
 }
 

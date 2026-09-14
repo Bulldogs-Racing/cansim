@@ -44,9 +44,13 @@ Rules (enforced in review, not just prose):
 src/can/          CAN core: id, frame, bus, arbitration, timing
 src/simulation/   SimClock, SimEvent log, headless Engine
 src/project/      versioned YAML project format + untrusted-input validation
+src/backends/     McuBackend seam (api) + Renode supervised runs (renode)
 src/main.rs       `canlab` CLI: new / simulate / validate / doctor / open
 tests/can_core.rs §74 acceptance tests (arbitration + delivery)
+tests/renode_backend.rs live Renode test (ignored by default, needs ELF + emulator)
 examples/         runnable .canlab.yaml projects
+backends/renode/  REPL overlay, .resc scripts (checked-in spike scripts)
+firmware/tests/   bare-metal STM32F103 TX/RX fixtures + build.sh
 frontend/         Phase 5 shell (types + placeholder canvas)
 docs/             user + developer documentation
 ```
@@ -57,5 +61,6 @@ docs/             user + developer documentation
 - [x] Phase 1 — CAN core + §74 tests
 - [x] Phase 3 (headless part) — `canlab simulate` on virtual nodes
 - [x] Phase 2 — CRC, stuffing, ACK, error counters, bus-off (+ wire faults)
-- [ ] Phase 4 — Renode backend with real STM32 firmware
+- [x] Phase 4 (headless part) — Renode backend: real STM32F103 firmware runs
+- [ ] Phase 4 (interactive part) — pause/step/inspect for the server layer
 - [ ] Phase 5+ — visual editor, analyzer, MCP2515, Teensy, faults, FD, DBC

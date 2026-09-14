@@ -1,0 +1,38 @@
+# CanLab Phase 4 spike, two nodes via CAN hub: the graded egress proof.
+# Headless use (run from .tools/renode so @platforms/... resolves):
+#   ./renode --disable-xwt \
+#     -e 'include @<repo>/backends/renode/scripts/canlab_stm32f103_hub.resc' \
+#     -e 'start'
+#
+# Topology (mirrors Renode's own NXP_FlexCAN/MCAN robot tests):
+#   tx-node.sysbus.can1 <---> canHub <---> rx-node.sysbus.can1
+# Success: tx-node UART shows "CAN TX OK", rx-node UART shows
+# "CAN RX 0x123 [01 02 03 04 05 06 07 08]".
+# Quantum/serial-execution settings are copied from those tests to keep
+# the two machines in sync.
+
+using sysbus
+
+$tx_elf?=$ORIGIN/../../../firmware/tests/stm32_can/build/can_tx.elf
+$rx_elf?=$ORIGIN/../../../firmware/tests/stm32_can/build/can_rx.elf
+
+emulation CreateCANHub "canHub" False
+
+# --- TX node (becomes current machine) ---
+mach create "tx-node"
+machine LoadPlatformDescription @platforms/cpus/stm32f103.repl
+machine LoadPlatformDescriptionFromString "can1: CAN.STMCAN @ sysbus <0x40006400, +0x400> { [0-3] -> nvic@[19-22] }"
+sysbus LoadELF $tx_elf
+connector Connect sysbus.can1 canHub
+showAnalyzer usart2
+
+# --- RX node (becomes current machine) ---
+mach create "rx-node"
+machine LoadPlatformDescription @platforms/cpus/stm32f103.repl
+machine LoadPlatformDescriptionFromString "can1: CAN.STMCAN @ sysbus <0x40006400, +0x400> { [0-3] -> nvic@[19-22] }"
+sysbus LoadELF $rx_elf
+connector Connect sysbus.can1 canHub
+showAnalyzer usart2
+
+emulation SetGlobalQuantum "0.000025"
+emulation SetGlobalSerialExecution True

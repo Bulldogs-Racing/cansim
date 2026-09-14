@@ -9,8 +9,10 @@
 //! - `device`/`backend` must come from a known allow-list; unknown values
 //!   are errors (typos fail fast instead of mis-simulating)
 //! - `firmware` paths: relative only, no absolute paths, no `..` traversal,
-//!   no shell metacharacters; missing files are *warnings* (virtual-node
-//!   headless runs don't need real ELF/HEX yet — Phase 4 will)
+//!   no shell metacharacters; existence is checked relative to `base_dir`
+//!   (the project file's directory). Missing files are *warnings*:
+//!   virtual-node headless runs don't need real ELF/HEX, and Renode runs
+//!   enforce presence strictly at simulate time with a dedicated error.
 //! - scripted `messages`: sender must exist, id ranges + DLC enforced
 
 use crate::project::schema::Project;
@@ -79,7 +81,7 @@ fn firmware_path_problem(fw: &str) -> Option<String> {
     None
 }
 
-pub fn validate_project(proj: &Project) -> ValidationReport {
+pub fn validate_project(proj: &Project, base_dir: &std::path::Path) -> ValidationReport {
     let mut rep = ValidationReport::default();
 
     if proj.buses.is_empty() {
@@ -150,17 +152,17 @@ pub fn validate_project(proj: &Project) -> ValidationReport {
                 format!("node attaches to unknown bus \"{}\"", n.can.bus),
             ));
         }
-        if n.backend == "renode" {
+        if n.backend == "renode" && n.device != "stm32f103" {
             rep.warnings.push(err(
                 &at,
-                "backend \"renode\" validates but does not execute yet (Phase 4); \
-                 headless runs use virtual-node behavior",
+                "backend \"renode\" executes only device \"stm32f103\" so far; \
+                 other devices fail at simulate time with an explicit error (Phases 7/8)",
             ));
         }
         if let Some(fw) = &n.firmware {
             if let Some(problem) = firmware_path_problem(fw) {
                 rep.errors.push(err(format!("{at}.firmware"), problem));
-            } else if !std::path::Path::new(fw).exists() {
+            } else if !base_dir.join(fw).exists() {
                 rep.warnings.push(err(
                     format!("{at}.firmware"),
                     format!("firmware file \"{fw}\" not found — ok for virtual runs"),
@@ -228,7 +230,7 @@ nodes:
     #[test]
     fn good_project_passes_with_warnings_only() {
         let p = Project::parse(GOOD).unwrap();
-        let rep = validate_project(&p);
+        let rep = validate_project(&p, std::path::Path::new("."));
         assert!(rep.is_ok(), "unexpected errors: {:?}", rep.errors);
     }
 
@@ -243,7 +245,7 @@ nodes:
   - {id: n1, device: toaster, backend: virtual, firmware: ../../etc/passwd, can: {bus: nope}}
 "#;
         let p = Project::parse(bad).unwrap();
-        let rep = validate_project(&p);
+        let rep = validate_project(&p, std::path::Path::new("."));
         assert!(!rep.is_ok());
         let msgs: Vec<_> = rep.errors.iter().map(|e| e.message.clone()).collect();
         assert!(msgs.iter().any(|m| m.contains("unknown device")));
@@ -255,7 +257,7 @@ nodes:
     fn fd_is_rejected_explicitly() {
         let fd = GOOD.replace("fd: false", "fd: true");
         let p = Project::parse(&fd).unwrap();
-        let rep = validate_project(&p);
+        let rep = validate_project(&p, std::path::Path::new("."));
         assert!(rep.errors.iter().any(|e| e.message.contains("CAN FD")));
     }
 }

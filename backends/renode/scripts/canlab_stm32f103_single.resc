@@ -1,0 +1,25 @@
+# CanLab Phase 4 spike, single node: STM32F103 + STMCAN overlay, TX firmware.
+# Headless use (run from .tools/renode so @platforms/... resolves):
+#   ./renode --disable-xwt \
+#     -e 'include @<repo>/backends/renode/scripts/canlab_stm32f103_single.resc' \
+#     -e 'sysbus LoadELF @<repo>/firmware/tests/stm32_can/build/can_tx.elf' \
+#     -e 'start'
+#
+# (Note: local ELF paths on the -e command line need the @ prefix; inside
+# .resc files $ORIGIN-relative paths are used WITHOUT @ -- see the hub
+# script. The @+$VAR combination does not resolve and hangs in a download
+# retry, a Renode scripting quirk documented in docs/phase4-spike.md.)
+#
+# Asserts (by grepping console/log output): "CANLAB TX BOOT", "CAN INIT OK",
+# "CAN TX OK" (proof the bxCAN mailbox completed without a model fault) or
+# "CAN TX FAIL ..." (a finding, not a hang -- firmware always reports).
+
+using sysbus
+
+mach create "tx-node"
+machine LoadPlatformDescription @platforms/cpus/stm32f103.repl
+# Spike overlay: stock stm32f103.repl has no CAN; CAN1 lives at 0x40006400
+# with IRQs TX=19 RX0=20 RX1=21 SCE=22 (mirrors stm32f4.repl binding).
+machine LoadPlatformDescriptionFromString "can1: CAN.STMCAN @ sysbus <0x40006400, +0x400> { [0-3] -> nvic@[19-22] }"
+
+showAnalyzer usart2

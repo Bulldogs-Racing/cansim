@@ -10,6 +10,7 @@
 //! Backend integrations (Renode, QEMU, SocketCAN) and the visual frontend
 //! build on top of these crates/modules — never the other way around.
 
+pub mod backends;
 pub mod can;
 pub mod project;
 pub mod simulation;

@@ -1,0 +1,593 @@
+//! Renode backend: supervised emulator runs for real STM32F103 firmware.
+//!
+//! Three jobs, kept separate so each is testable without the emulator:
+//!
+//! 1. [`resolve_binary`] — find `renode` on PATH or repo-local
+//!    (`.tools/renode`, `$CANLAB_TOOLS`); actionable error otherwise.
+//! 2. [`generate_resc`] — pure function `RenodeRunSpec -> .resc text`
+//!    (platform + STMCAN overlay + CAN hub + ELF per node + sync settings,
+//!    per the Phase 4 spike findings in `docs/phase4-spike.md`).
+//! 3. [`RenodeBackend::run`] — write the script to a unique temp dir, spawn
+//!    the child with piped output, drain pipes on threads (no pipe-buffer
+//!    deadlock), enforce the wall-clock timeout, kill on timeout or drop
+//!    (never orphaned, §19), parse UART lines into [`BackendOutcome`].
+//!
+//! Device support is explicit (§72): `stm32f103` executes; everything else
+//! fails with a named reason instead of pretending.
+
+use super::api::{
+    BackendError, BackendOutcome, FrameDir, McuBackend, NodeFirmware, ObservedFrame, ObservedUart,
+    RenodeRunSpec,
+};
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// `CAN.STMCAN` overlay for STM32F103 (stock `stm32f103.repl` ships no CAN).
+/// Base `0x40006400`, IRQs TX=19/RX0=20/RX1=21/SCE=22 — mirrors Renode's
+/// own `stm32f4.repl` binding and the F103 reference manual.
+pub const STM32F103_CAN_OVERLAY: &str =
+    "can1: CAN.STMCAN @ sysbus <0x40006400, +0x400> { [0-3] -> nvic@[19-22] }";
+
+/// Only device the Renode backend executes today. Arduino (AVR core) and
+/// Teensy (no FlexCAN model in Renode) are named rejections, not TODOs.
+pub const RENODE_SUPPORTED_DEVICE: &str = "stm32f103";
+
+pub struct RenodeBackend {
+    pub binary: PathBuf,
+}
+
+impl RenodeBackend {
+    /// Locate the emulator or explain how to install it (§68).
+    pub fn discover() -> Result<Self, BackendError> {
+        Ok(RenodeBackend {
+            binary: resolve_binary()?,
+        })
+    }
+
+    /// Check one node up front: supported device + present, ELF firmware.
+    /// Called before spawning anything so config errors fail fast.
+    pub fn check_node(node: &NodeFirmware) -> Result<(), BackendError> {
+        if node.device != RENODE_SUPPORTED_DEVICE {
+            return Err(BackendError::UnsupportedDevice {
+                device: node.device.clone(),
+                node: node.node_id.clone(),
+                backend: "renode".into(),
+                hint: device_hint(&node.device),
+            });
+        }
+        if !node.elf.is_file() {
+            return Err(BackendError::FirmwareMissing {
+                node: node.node_id.clone(),
+                path: node.elf.display().to_string(),
+            });
+        }
+        let mut magic = [0u8; 4];
+        let mut f = std::fs::File::open(&node.elf).map_err(|e| BackendError::Io(e.to_string()))?;
+        f.read_exact(&mut magic)
+            .map_err(|e| BackendError::Io(e.to_string()))?;
+        if magic != [0x7F, b'E', b'L', b'F'] {
+            return Err(BackendError::FirmwareNotElf {
+                node: node.node_id.clone(),
+                path: node.elf.display().to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn device_hint(device: &str) -> String {
+    match device {
+        "arduino_uno" => "Arduino Uno runs on an AVR core Renode does not model; its CAN path (ATmega328P SPI -> MCP2515) is Phase 7. Use backend \"virtual\" for headless runs until then.".into(),
+        "teensy41" => "Teensy 4.1 / FlexCAN has no executing backend yet (Phase 8): Renode's i.MX RT1062 platform only labels the FlexCAN regions, it models no FlexCAN peripheral. Recognized but not emulated — never silently as an STM32.".into(),
+        _ => format!("Known devices: {RENODE_SUPPORTED_DEVICE} (renode), stm32f103 / arduino_uno / teensy41 (virtual)."),
+    }
+}
+
+impl McuBackend for RenodeBackend {
+    fn name(&self) -> &'static str {
+        "renode"
+    }
+
+    fn run(&self, spec: &RenodeRunSpec) -> Result<BackendOutcome, BackendError> {
+        for node in &spec.nodes {
+            Self::check_node(node)?;
+        }
+        if spec.nodes.is_empty() {
+            return Err(BackendError::Io(
+                "renode run needs at least one node".into(),
+            ));
+        }
+        let script = generate_resc(spec);
+        let workdir = create_workdir().map_err(|e| BackendError::Io(e.to_string()))?;
+        let resc_path = workdir.join("canlab.resc");
+        std::fs::write(&resc_path, script).map_err(|e| BackendError::Io(e.to_string()))?;
+
+        let output = run_supervised(
+            &self.binary,
+            &["--disable-xwt", "--port", "0"],
+            &[format!("include @{}", resc_path.display()), "start".into()],
+            Duration::from_secs(spec.run_secs.max(1)),
+        )?;
+        // Best-effort cleanup; the log is already captured in `output`.
+        let _ = std::fs::remove_dir_all(&workdir);
+        Ok(collect_outcome(&output, spec))
+    }
+}
+
+/// Find the Renode binary: `PATH` first, then repo-local roots
+/// (`$CANLAB_TOOLS`, `./.tools`). Mirrors `canlab doctor` probing.
+pub fn resolve_binary() -> Result<PathBuf, BackendError> {
+    if let Some(path) = probe_path("renode") {
+        return Ok(path);
+    }
+    let mut roots = Vec::new();
+    if let Some(dir) = std::env::var_os("CANLAB_TOOLS") {
+        roots.push(PathBuf::from(dir));
+    }
+    roots.push(PathBuf::from(".tools"));
+    for root in &roots {
+        let candidate = root.join("renode").join("renode");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(BackendError::NotInstalled {
+        searched: roots
+            .iter()
+            .map(|r| r.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    })
+}
+
+fn probe_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Pure `.resc` generator: one machine per node, all CAN1s on one hub.
+///
+/// Renode scripting rules baked in here come from the spike
+/// (`docs/phase4-spike.md` finding 5): `#` comments, `sysbus LoadELF`,
+/// literal paths with the `@` file prefix, per-machine
+/// `connector Connect`, global quantum + serial execution for
+/// multi-machine sync. (`@$VAR` and `@...` inside `$var?=` defaults do
+/// not resolve — the generator only emits literals and bare `$ORIGIN`
+/// defaults, both verified against Renode 1.17.)
+pub fn generate_resc(spec: &RenodeRunSpec) -> String {
+    let mut s = String::new();
+    s.push_str("# Generated by CanLab (backends::renode). Do not hand-edit;\n");
+    s.push_str("# regenerate via `canlab simulate`. See docs/phase4-spike.md.\n");
+    s.push_str("using sysbus\n\n");
+    s.push_str("emulation CreateCANHub \"canHub\" False\n");
+    for node in &spec.nodes {
+        s.push_str(&format!(
+            "\n# --- node: {} (device {}) ---\n",
+            node.node_id, node.device
+        ));
+        s.push_str(&format!("mach create \"{}\"\n", node.machine));
+        s.push_str("machine LoadPlatformDescription @platforms/cpus/stm32f103.repl\n");
+        s.push_str(&format!(
+            "machine LoadPlatformDescriptionFromString \"{}\"\n",
+            STM32F103_CAN_OVERLAY
+        ));
+        // Literal absolute paths need the `@` file prefix (proven in the
+        // spike); `$VAR`/`$ORIGIN` forms are used bare. We emit literals,
+        // so prefix them. (`@$VAR` does not resolve — never emit that.)
+        s.push_str(&format!("sysbus LoadELF @{}\n", node.elf.display()));
+        s.push_str("connector Connect sysbus.can1 canHub\n");
+        s.push_str("showAnalyzer usart2\n");
+    }
+    s.push_str("\nemulation SetGlobalQuantum \"0.000025\"\n");
+    s.push_str("emulation SetGlobalSerialExecution True\n");
+    s
+}
+
+/// Unique scratch dir per run (no hard-coded temp paths, §18).
+fn create_workdir() -> std::io::Result<PathBuf> {
+    let dir = std::env::temp_dir().join(format!(
+        "canlab-renode-{}-{}",
+        std::process::id(),
+        next_nonce()
+    ));
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn next_nonce() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NONCE: AtomicU64 = AtomicU64::new(0);
+    // Mix in nanos so concurrent CLI invocations (different pids covered
+    // above; same pid impossible) still get unique dirs.
+    NONCE.fetch_add(1, Ordering::Relaxed)
+        ^ (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(0))
+}
+
+/// Spawn Renode with piped output, drain pipes on threads, enforce the
+/// wall-clock budget, then shut down.
+///
+/// `extra_e` commands are passed as separate `-e` flags (one monitor
+/// command per flag; `;`-joined assignments do not tokenize).
+///
+/// Shutdown order (PROMPT.md §19: clean shutdown, never orphaned):
+/// 1. If the child exits on its own (finite firmware, script error), reap
+///    it: success returns the log, nonzero returns [`BackendError::EarlyExit`].
+/// 2. When the budget elapses — the normal end, since firmware loops
+///    forever — ask for a graceful `quit` over the telnet monitor, wait
+///    briefly, then fall back to kill. The child is always reaped.
+fn run_supervised(
+    binary: &Path,
+    args: &[&str],
+    extra_e: &[String],
+    budget: Duration,
+) -> Result<String, BackendError> {
+    let mut cmd = Command::new(binary);
+    cmd.args(args);
+    for e in extra_e {
+        cmd.arg("-e").arg(e);
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Run from the Renode install dir so `@platforms/...` resolves, exactly
+    // like the documented manual runs.
+    if let Some(dir) = binary.parent() {
+        // Portable layout: <root>/renode binary with platforms/ beside it.
+        let root = dir;
+        if root.join("platforms").is_dir() {
+            cmd.current_dir(root);
+        } else if let Some(parent) = root.parent() {
+            if parent.join("platforms").is_dir() {
+                cmd.current_dir(parent);
+            }
+        }
+    }
+    let mut child: Child = cmd.spawn().map_err(|e| BackendError::SpawnFailed {
+        binary: binary.display().to_string(),
+        cause: e.to_string(),
+    })?;
+
+    // Drain pipes on threads so a chatty emulation can never block on a
+    // full pipe buffer while we wait for the timeout.
+    let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut threads = Vec::new();
+    if let Some(out) = child.stdout.take() {
+        let buf = Arc::clone(&stdout_buf);
+        threads.push(std::thread::spawn(move || {
+            let mut src = out;
+            let mut tmp = [0u8; 8192];
+            loop {
+                match src.read(&mut tmp) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.lock().unwrap().extend_from_slice(&tmp[..n]),
+                }
+            }
+        }));
+    }
+    if let Some(err) = child.stderr.take() {
+        let buf = Arc::clone(&stderr_buf);
+        threads.push(std::thread::spawn(move || {
+            let mut src = err;
+            let mut tmp = [0u8; 8192];
+            loop {
+                match src.read(&mut tmp) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.lock().unwrap().extend_from_slice(&tmp[..n]),
+                }
+            }
+        }));
+    }
+
+    let start = Instant::now();
+    loop {
+        match child
+            .try_wait()
+            .map_err(|e| BackendError::Io(e.to_string()))?
+        {
+            Some(status) => {
+                // Natural exit: reap, join drainers, collect output.
+                let _ = child.wait();
+                for t in threads {
+                    let _ = t.join();
+                }
+                return finish(status, &stdout_buf, &stderr_buf);
+            }
+            None => {
+                if start.elapsed() >= budget {
+                    return shutdown(&mut child, threads, &stdout_buf, &stderr_buf);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
+
+/// Collect drained output and map a natural exit to log-or-error.
+fn finish(
+    status: std::process::ExitStatus,
+    stdout_buf: &Arc<Mutex<Vec<u8>>>,
+    stderr_buf: &Arc<Mutex<Vec<u8>>>,
+) -> Result<String, BackendError> {
+    let log = drain_to_string(stdout_buf, stderr_buf);
+    if status.success() {
+        Ok(log)
+    } else {
+        // Renode exits nonzero on script errors (bad platform, missing
+        // ELF…). Surface the tail, not a bare status code.
+        Err(BackendError::EarlyExit {
+            status: status.to_string(),
+            tail: tail_of(&log, 25),
+        })
+    }
+}
+
+/// Budget elapsed: graceful `quit` via the telnet monitor if we learned its
+/// port, brief grace period, then kill. The child is always reaped — no
+/// orphaned emulator processes (§19).
+fn shutdown(
+    child: &mut Child,
+    threads: Vec<std::thread::JoinHandle<()>>,
+    stdout_buf: &Arc<Mutex<Vec<u8>>>,
+    stderr_buf: &Arc<Mutex<Vec<u8>>>,
+) -> Result<String, BackendError> {
+    if let Some(port) = monitor_port(stdout_buf) {
+        if send_quit(port) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                match child
+                    .try_wait()
+                    .map_err(|e| BackendError::Io(e.to_string()))?
+                {
+                    Some(status) => {
+                        let _ = child.wait();
+                        for t in threads {
+                            let _ = t.join();
+                        }
+                        return finish(status, stdout_buf, stderr_buf);
+                    }
+                    None => std::thread::sleep(Duration::from_millis(100)),
+                }
+            }
+        }
+    }
+    let _ = child.kill();
+    let status = child.wait().map_err(|e| BackendError::Io(e.to_string()))?;
+    for t in threads {
+        let _ = t.join();
+    }
+    // Killed after a full budget of observations: that IS the run result.
+    // A nonzero-after-kill status is expected (SIGKILL), not an error.
+    let _ = status;
+    Ok(drain_to_string(stdout_buf, stderr_buf))
+}
+
+fn drain_to_string(stdout_buf: &Arc<Mutex<Vec<u8>>>, stderr_buf: &Arc<Mutex<Vec<u8>>>) -> String {
+    let mut log = String::from_utf8_lossy(&stdout_buf.lock().unwrap()).into_owned();
+    let err = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).into_owned();
+    if !err.is_empty() {
+        log.push_str("\n--- stderr ---\n");
+        log.push_str(&err);
+    }
+    log
+}
+
+fn tail_of(log: &str, n: usize) -> String {
+    log.lines()
+        .rev()
+        .take(n)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Scrape the telnet monitor port from Renode's stdout
+/// (`Monitor available in telnet mode on port N`).
+fn monitor_port(stdout_buf: &Arc<Mutex<Vec<u8>>>) -> Option<u16> {
+    let text = String::from_utf8_lossy(&stdout_buf.lock().unwrap()).into_owned();
+    let marker = "telnet mode on port ";
+    let idx = text.rfind(marker)?;
+    text[idx + marker.len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
+/// Best-effort graceful quit: connect, send `quit`, close. Returns whether
+/// the command was delivered (the caller still verifies process exit).
+fn send_quit(port: u16) -> bool {
+    use std::io::Write as _;
+    let addr = format!("127.0.0.1:{port}");
+    let Ok(stream) = std::net::TcpStream::connect_timeout(
+        &addr.parse().expect("loopback addr parses"),
+        Duration::from_secs(2),
+    ) else {
+        return false;
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let mut stream = stream;
+    stream.write_all(b"quit\n").is_ok()
+}
+
+/// Parse the emulator log into UART observations + CAN frames.
+///
+/// `machine -> node` comes from the spec (we generated the machine names).
+pub fn collect_outcome(log: &str, spec: &RenodeRunSpec) -> BackendOutcome {
+    use super::api::{parse_can_line, parse_uart_line};
+    let by_machine: std::collections::HashMap<&str, &str> = spec
+        .nodes
+        .iter()
+        .map(|n| (n.machine.as_str(), n.node_id.as_str()))
+        .collect();
+    let mut uart = Vec::new();
+    let mut tx_frames = Vec::new();
+    let mut rx_frames = Vec::new();
+    for line in log.lines() {
+        let Some(u) = parse_uart_line(line) else {
+            continue;
+        };
+        let node = by_machine
+            .get(u.machine.as_str())
+            .copied()
+            .unwrap_or(u.machine.as_str());
+        if let Some(f) = parse_can_line(&u.message, node) {
+            let dir = f.dir;
+            let obs = ObservedFrame {
+                node: node.into(),
+                dir,
+                frame: f.frame,
+            };
+            match dir {
+                FrameDir::Tx => tx_frames.push(obs),
+                FrameDir::Rx => rx_frames.push(obs),
+            }
+        }
+        uart.push(ObservedUart {
+            machine: u.machine,
+            message: u.message,
+        });
+    }
+    BackendOutcome {
+        uart,
+        tx_frames,
+        rx_frames,
+        raw_log: log.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::api::NodeFirmware;
+    use super::*;
+
+    fn spec_two_nodes() -> RenodeRunSpec {
+        RenodeRunSpec {
+            bus_id: "vehicle_bus".into(),
+            bitrate: 500_000,
+            nodes: vec![
+                NodeFirmware {
+                    node_id: "engine_ecu".into(),
+                    machine: NodeFirmware::machine_name("engine_ecu"),
+                    device: "stm32f103".into(),
+                    elf: PathBuf::from("/tmp/firmware/engine.elf"),
+                },
+                NodeFirmware {
+                    node_id: "dash board!".into(),
+                    machine: NodeFirmware::machine_name("dash board!"),
+                    device: "stm32f103".into(),
+                    elf: PathBuf::from("/tmp/firmware/dash.hex"),
+                },
+            ],
+            run_secs: 90,
+        }
+    }
+
+    #[test]
+    fn resc_has_overlay_hub_machine_per_node_and_sync() {
+        let resc = generate_resc(&spec_two_nodes());
+        assert!(resc.contains("emulation CreateCANHub \"canHub\" False"));
+        assert!(resc.contains(STM32F103_CAN_OVERLAY));
+        assert!(resc.contains("mach create \"engine_ecu\""));
+        assert!(resc.contains("mach create \"dash_board_\""));
+        assert!(resc.contains("sysbus LoadELF @/tmp/firmware/engine.elf"));
+        assert!(resc.contains("connector Connect sysbus.can1 canHub"));
+        assert!(resc.contains("emulation SetGlobalQuantum \"0.000025\""));
+        assert!(resc.contains("emulation SetGlobalSerialExecution True"));
+        // No `@$VAR` forms (known Renode hang): LoadELF lines use literal
+        // `@/abs/path` or bare `$VAR` paths.
+        assert!(!resc.contains("@$"));
+    }
+
+    #[test]
+    fn check_node_rejects_devices_and_non_elf() {
+        let dir = std::env::temp_dir();
+        let elf = dir.join("canlab-test-notelf.bin");
+        std::fs::write(&elf, b"not an elf").unwrap();
+        let bad = NodeFirmware {
+            node_id: "n".into(),
+            machine: "n".into(),
+            device: "arduino_uno".into(),
+            elf: elf.clone(),
+        };
+        let err = RenodeBackend::check_node(&bad).unwrap_err();
+        assert!(err.to_string().contains("Phase 7"), "{err}");
+        let teensy = NodeFirmware {
+            device: "teensy41".into(),
+            ..bad.clone()
+        };
+        let err = RenodeBackend::check_node(&teensy).unwrap_err();
+        assert!(err.to_string().contains("Phase 8"), "{err}");
+        let notelf = NodeFirmware {
+            device: "stm32f103".into(),
+            ..bad
+        };
+        let err = RenodeBackend::check_node(&notelf).unwrap_err();
+        assert!(err.to_string().contains("not an ELF"), "{err}");
+        let missing = NodeFirmware {
+            node_id: "n".into(),
+            machine: "n".into(),
+            device: "stm32f103".into(),
+            elf: dir.join("canlab-test-nope.elf"),
+        };
+        let err = RenodeBackend::check_node(&missing).unwrap_err();
+        assert!(err.to_string().contains("not found"), "{err}");
+        let _ = std::fs::remove_file(&elf);
+    }
+
+    #[test]
+    fn collects_frames_from_spike_log() {
+        let log = "[16:11:27.4125] [INFO] tx-node/usart2: [host: 0.18s|virt: 0s] CANLAB TX BOOT\n\
+                   [16:11:30.6374] [INFO] tx-node/usart2: [host: 3.4s|virt: 0.4s] CAN TX OK 0x123 [01 02 03 04 05 06 07 08]\n\
+                   [16:11:30.6444] [INFO] rx-node/usart2: [host: 3.29s|virt: 0.4s] CAN RX 0x123 [01 02 03 04 05 06 07 08]\n\
+                   [16:11:27.3731] [INFO] tx-node: Machine started.\n";
+        let spec = RenodeRunSpec {
+            bus_id: "b".into(),
+            bitrate: 500_000,
+            nodes: vec![
+                NodeFirmware {
+                    node_id: "engine_ecu".into(),
+                    machine: "tx-node".into(),
+                    device: "stm32f103".into(),
+                    elf: PathBuf::from("/x"),
+                },
+                NodeFirmware {
+                    node_id: "dashboard".into(),
+                    machine: "rx-node".into(),
+                    device: "stm32f103".into(),
+                    elf: PathBuf::from("/y"),
+                },
+            ],
+            run_secs: 90,
+        };
+        let out = collect_outcome(log, &spec);
+        assert_eq!(out.uart.len(), 3);
+        assert_eq!(out.tx_frames.len(), 1);
+        assert_eq!(out.rx_frames.len(), 1);
+        assert_eq!(out.tx_frames[0].node, "engine_ecu");
+        assert_eq!(out.rx_frames[0].node, "dashboard");
+        assert_eq!(out.tx_frames[0].frame, out.rx_frames[0].frame);
+    }
+
+    #[test]
+    fn workdir_is_unique_and_cleanable() {
+        let a = create_workdir().unwrap();
+        let b = create_workdir().unwrap();
+        assert_ne!(a, b);
+        std::fs::remove_dir_all(&a).unwrap();
+        std::fs::remove_dir_all(&b).unwrap();
+    }
+}

@@ -1,0 +1,24 @@
+// CanLab Phase 4 spike overlay: expose Renode's bxCAN model (CAN.STMCAN)
+// on an STM32F103 machine, which ships without CAN in stock Renode.
+//
+// Stock `.tools/renode/platforms/cpus/stm32f103.repl` defines CPU, NVIC,
+// GPIO, USART, I2C, timers, DMA — but no CAN peripheral. The STM32F103
+// reference manual maps CAN1 at 0x40006400 with IRQs TX=19, RX0=20,
+// RX1=21, SCE=22 (identical to the stm32f4.repl binding), so this overlay
+// mirrors that binding instead of inventing one:
+//
+//     can1: CAN.STMCAN @ sysbus <0x40006400, +0x400>
+//         [0-3] -> nvic@[19-22]
+//
+// Usage (no Renode fork, no edit to stock files):
+//
+//     machine LoadPlatformDescription @platforms/cpus/stm32f103.repl
+//     machine LoadPlatformDescription @<this file>
+//       -- or --
+//     machine LoadPlatformDescriptionFromString "can1: CAN.STMCAN @ sysbus <0x40006400, +0x400> { [0-3] -> nvic@[19-22] }"
+//
+// Single CAN1 only: the medium-density F103C8 has one bxCAN; CAN2 exists
+// only on connectivity-line parts and is out of scope for the spike.
+
+can1: CAN.STMCAN @ sysbus <0x40006400, +0x400>
+    [0-3] -> nvic@[19-22]

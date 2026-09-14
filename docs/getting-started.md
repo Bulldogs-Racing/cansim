@@ -55,6 +55,24 @@ Simulation started.
 Simulation finished: 2 frame(s) transmitted, 2 reception(s).
 ```
 
+## Run real STM32F103 firmware (Renode backend)
+
+Build the fixture firmware, then simulate an all-`renode` project:
+
+```bash
+./firmware/tests/stm32_can/build.sh
+cargo run -q --bin canlab -- simulate <your-renode-project.canlab> --run-secs 30
+```
+
+A Renode project looks like the virtual one, but every node uses
+`backend: renode`, `device: stm32f103`, and a project-relative `firmware:`
+path to a real `.elf` you built yourself (copy/paste is fine — no IDE
+integration needed). `canlab simulate` boots one emulated node per project
+node, joins their CAN1s on a virtual hub, captures UART output, and replays
+observed frames through the deterministic engine. Only `stm32f103` executes;
+other devices fail with an explicit error. See `docs/mcu-backends.md` for
+run semantics (`--run-secs` is a duration, not a failure timeout).
+
 ## Scaffold and validate a project
 
 ```bash

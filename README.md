@@ -4,11 +4,12 @@ CAN-first simulator: visually build networks of simulated STM32 / Arduino /
 Teensy nodes, run firmware, and debug real CAN traffic. See `PROMPT.md` for
 the full product spec and `docs/` for developer documentation.
 
-> Status: **Phases 0–2 + headless Phase 3** — deterministic CAN core
+> Status: **Phases 0–2 + headless Phase 3 + headless Phase 4** — deterministic CAN core
 > (frames, arbitration, virtual bus) with bit-level codec (CRC-15,
 > stuffing, SOF..EOF), ACK handling, TEC/REC confinement, bus-off, and
-> deterministic wire faults. `canlab simulate` runs without a GUI. Renode firmware execution (Phase 4) and the visual editor
-> (Phase 5) are scaffolded, not yet implemented.
+> deterministic wire faults. `canlab simulate` runs virtual nodes without a GUI
+> and runs real STM32F103 firmware in Renode (`backend: renode`, all-renode
+> projects). The visual editor (Phase 5) is scaffolded, not yet implemented.
 
 ## Quickstart
 
@@ -23,7 +24,8 @@ More: `docs/getting-started.md`, `docs/architecture.md`, `docs/can-model.md`.
 
 ```bash
 canlab new my-project                  # scaffold portable project dir
-canlab simulate project.canlab         # headless deterministic run
+canlab simulate project.canlab         # headless run (virtual or Renode)
+canlab simulate renode.canlab --run-secs 30 --export-json events.json
 canlab validate project.canlab         # schema + safety checks
 canlab doctor                          # Renode / toolchains / SocketCAN
 ```
@@ -34,8 +36,12 @@ canlab doctor                          # Renode / toolchains / SocketCAN
 src/can/          CAN core (no emulator/GUI deps)
 src/simulation/   deterministic clock, events, headless engine
 src/project/      versioned YAML project format + validation
+src/backends/     McuBackend seam + supervised Renode runs
 src/main.rs       CLI
 tests/can_core.rs §74 acceptance tests
+tests/renode_backend.rs live Renode test (ignored; needs ELF + emulator)
+backends/renode/  STMCAN overlay + .resc scripts
+firmware/tests/   bare-metal STM32F103 TX/RX fixtures
 examples/         runnable projects
 frontend/         Phase 5 React shell (placeholder)
 docs/             architecture, CAN model, guides

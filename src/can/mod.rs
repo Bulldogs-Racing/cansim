@@ -4,8 +4,8 @@
 //! frontend, or hardware interface. It models:
 //!
 //! - Level 1 — CAN frame: [`CanId`], [`CanFrame`] (ID / DLC / DATA)
-//! - Level 2 — bit model: [`Bit`], [`crc`] (more wire codecs landing in
-//!   Phase 2: stuffing, full frame encode/decode, error confinement)
+//! - Level 2 — bit model: [`Bit`], [`crc`], [`stuffing`] (frame
+//!   encode/decode and error confinement landing next in Phase 2)
 //! - Bus + arbitration: [`CanBus`], [`arbitration`] (logical frame delivery)
 //! - Timing: [`timing`] (simulation timestamps; no wall-clock dependence)
 //!
@@ -18,6 +18,7 @@ pub mod bus;
 pub mod crc;
 pub mod frame;
 pub mod id;
+pub mod stuffing;
 pub mod timing;
 
 pub use arbitration::{arbitrate_ranking, arbitration_key, compare_frames};

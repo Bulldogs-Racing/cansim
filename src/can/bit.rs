@@ -112,8 +112,8 @@ mod tests {
 
     #[test]
     fn polarity_conventions() {
-        assert_eq!(Bit::Dominant.as_bool(), false);
-        assert_eq!(Bit::Recessive.as_bool(), true);
+        assert!(!Bit::Dominant.as_bool());
+        assert!(Bit::Recessive.as_bool());
         assert_eq!(Bit::from(false), Bit::Dominant);
         assert_eq!(Bit::from(true), Bit::Recessive);
         assert_eq!(Bit::Dominant.flipped(), Bit::Recessive);

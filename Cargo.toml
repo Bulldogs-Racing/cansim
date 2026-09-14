@@ -22,3 +22,8 @@ serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1"
 thiserror = "2"
+
+[dev-dependencies]
+# Test-only cross-validation for the §11 CRC-15 implementation: an
+# independent, widely-used catalogue implementation (CRC_15_CAN).
+crc = "3"

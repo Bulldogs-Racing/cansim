@@ -7,6 +7,7 @@
 //! - Level 2 — bit model: [`Bit`], [`crc`], [`stuffing`] (frame
 //!   encode/decode and error confinement landing next in Phase 2)
 //! - Bus + arbitration: [`CanBus`], [`arbitration`] (logical frame delivery)
+//! - Error handling: [`errors`], [`state`] (detection kinds, TEC/REC, states)
 //! - Timing: [`timing`] (simulation timestamps; no wall-clock dependence)
 //!
 //! The frame API stays stable and convenient while the bit model grows
@@ -17,8 +18,10 @@ pub mod bit;
 pub mod bits;
 pub mod bus;
 pub mod crc;
+pub mod errors;
 pub mod frame;
 pub mod id;
+pub mod state;
 pub mod stuffing;
 pub mod timing;
 

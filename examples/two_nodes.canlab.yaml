@@ -1,0 +1,38 @@
+version: 1
+
+simulation:
+  mode: deterministic
+
+buses:
+  - id: vehicle_bus
+    type: can
+    bitrate: 500000
+    fd: false
+
+nodes:
+  - id: engine_ecu
+    device: stm32f103
+    backend: virtual
+    firmware: ./firmware/engine.elf
+    can:
+      bus: vehicle_bus
+
+  - id: dashboard
+    device: arduino_uno
+    backend: virtual
+    firmware: ./firmware/dashboard.hex
+    peripherals:
+      - type: mcp2515
+        spi: spi0
+    can:
+      bus: vehicle_bus
+
+# Optional scripted traffic for headless runs (CanLab extension).
+# Without this section the CLI sends a default 0x123 demo frame.
+messages:
+  - sender: engine_ecu
+    id: 0x123
+    data: [0x01, 0x02, 0x03, 0x04]
+  - sender: dashboard
+    id: 0x200
+    data: [0x20, 0x01, 0x00, 0x00]

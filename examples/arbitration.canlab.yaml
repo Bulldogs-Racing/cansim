@@ -1,0 +1,38 @@
+version: 1
+
+simulation:
+  mode: deterministic
+
+buses:
+  - id: vehicle_bus
+    type: can
+    bitrate: 500000
+    fd: false
+
+nodes:
+  - id: node_a
+    device: generic_can_node
+    backend: virtual
+    can:
+      bus: vehicle_bus
+  - id: node_b
+    device: generic_can_node
+    backend: virtual
+    can:
+      bus: vehicle_bus
+  - id: node_c
+    device: generic_can_node
+    backend: virtual
+    can:
+      bus: vehicle_bus
+
+messages:
+  - sender: node_a
+    id: 0x300
+    data: [0xAA]
+  - sender: node_b
+    id: 0x100
+    data: [0xBB]
+  - sender: node_c
+    id: 0x200
+    data: [0xCC]

@@ -59,16 +59,17 @@ background while the GUI stays interactive:
    firmware traffic.
 
 Protocol: `StartRenodeRun` / `GetRenodeJob` / `CancelRenodeJob` /
-`ListRenodeJobs` / `ImportRenodeTrace` (`docs/api.md`). A running job can
+`GetRenodeLog` / `ListRenodeJobs` / `ImportRenodeTrace` (`docs/api.md`). A running job can
 be cancelled (graceful emulator shutdown, `cancelled` state, partial
 observations discarded — cancel early, import never). Semantics: jobs run
 against project files (same contract as headless: all-`renode` nodes,
 first bus, project-relative firmware, per-node pre-checks — shared
 builder `spec_from_project` so CLI and GUI agree); import is batch-inject
 at the current engine time and needs the session to contain the observed
-senders. Limits (explicit): no per-job UART over WS (use headless
-`simulate` for full logs), newest 32 finished jobs kept. Live coverage:
-`cargo test --test renode_ws -- --ignored` (import + cancel).
+senders. Limits (explicit): per-job UART is capped at the last 200
+lines over WS (use headless `simulate` for full raw logs), newest 32
+finished jobs kept. Live coverage:
+`cargo test --test renode_ws -- --ignored` (import + cancel + log).
 
 ```bash
 canlab simulate project.canlab [--run-secs 30] [--export-json events.json]

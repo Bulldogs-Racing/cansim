@@ -34,6 +34,7 @@ export type ClientMsg =
   | { type: "StartRenodeRun"; path: string; runSecs?: number }
   | { type: "GetRenodeJob"; jobId: number }
   | { type: "CancelRenodeJob"; jobId: number }
+  | { type: "GetRenodeLog"; jobId: number; lastN?: number }
   | { type: "ListRenodeJobs" }
   | { type: "ImportRenodeTrace"; jobId: number };
 
@@ -140,6 +141,12 @@ export const KNOWN_DEVICES = [
   "generic_can_node",
 ];
 
+/** One firmware UART line (mirror of UartLine in src/server/proto.rs). */
+export interface UartLine {
+  machine: string;
+  message: string;
+}
+
 /** One background firmware run (mirror of JobInfo in src/server/proto.rs). */
 export interface RenodeJob {
   jobId: number;
@@ -162,6 +169,7 @@ export type ServerMsg =
   | { type: "RenodeJobStarted"; jobId: number }
   | { type: "RenodeJob"; job: RenodeJob }
   | { type: "RenodeJobList"; jobs: RenodeJob[] }
+  | { type: "RenodeLog"; jobId: number; total: number; lines: UartLine[] }
   | { type: "TraceImported"; transmitted: number; received: number; nextSeq: number }
   | { type: "Pong" }
   | { type: "Error"; message: string };

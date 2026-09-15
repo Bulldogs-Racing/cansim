@@ -365,6 +365,9 @@ fn ws_renode_jobs_reject_bad_input_without_emulator() {
     // Cancelling an unknown job is an Error, not a silent no-op.
     let err = rpc(&mut ws, r#"{"type":"CancelRenodeJob","jobId":99}"#);
     assert_eq!(err["type"], "Error");
+    // So is reading its log.
+    let err = rpc(&mut ws, r#"{"type":"GetRenodeLog","jobId":99}"#);
+    assert_eq!(err["type"], "Error");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

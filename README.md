@@ -112,8 +112,8 @@ The GUI is a web app with three parts: a network **canvas**, run/simulation
   timestamps). The table is capped at 500 rows.
 - **Renode firmware runs**: start real STM32F103 firmware in the
   background (project path + run budget), watch jobs poll to done (or
-  **Cancel** a runaway), then **Import trace** to replay observed firmware
-  frames into the analyzer.
+  **Cancel** a runaway), inspect per-job firmware **Log**, then **Import
+  trace** to replay observed firmware frames into the analyzer.
   Needs the fixture ELFs (`firmware/tests/stm32_can/build.sh`) and the
   dotnet runtime if your renode requires it (`canlab doctor` tells you).
 - **Fault injection**: drive one corrupted frame now (flip a wire bit,

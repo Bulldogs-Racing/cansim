@@ -27,6 +27,7 @@ import {
   RenodeJob,
   SeqEvent,
   ServerMsg,
+  UartLine,
   WireFault,
 } from "./api";
 
@@ -86,6 +87,9 @@ export default function App(): JSX.Element {
   const [renodePath, setRenodePath] = useState("firmware/tests/stm32_can/two_nodes.canlab.yaml");
   const [runSecsText, setRunSecsText] = useState("30");
   const [jobs, setJobs] = useState<RenodeJob[]>([]);
+  const [logJobId, setLogJobId] = useState<number | null>(null);
+  const [logLines, setLogLines] = useState<UartLine[]>([]);
+  const [logTotal, setLogTotal] = useState(0);
   const [selected, setSelected] = useState<AnalyzerRow | null>(null);
   const [summary, setSummary] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -334,6 +338,32 @@ export default function App(): JSX.Element {
     }
     void renodeCmd("StartRenodeRun", { type: "StartRenodeRun", path: renodePath.trim(), runSecs: secs });
   }, [renodeCmd, renodePath, runSecsText, showError]);
+
+  /** Toggle one job's firmware log (last 20 UART lines; cancelled jobs
+   *  have none — partials are discarded at cancel time). */
+  const loadJobLog = useCallback(async (jobId: number) => {
+    const api = apiRef.current;
+    if (!api) {
+      showError("not connected — press Connect first");
+      return;
+    }
+    if (logJobId === jobId) {
+      setLogJobId(null);
+      return;
+    }
+    try {
+      const reply = await api.request({ type: "GetRenodeLog", jobId, lastN: 20 });
+      if (reply.type === "RenodeLog") {
+        setLogJobId(jobId);
+        setLogLines(reply.lines);
+        setLogTotal(reply.total);
+      } else if (reply.type === "Error") {
+        showError(`GetRenodeLog: ${reply.message}`);
+      }
+    } catch (e) {
+      showError(e instanceof Error ? e.message : String(e));
+    }
+  }, [logJobId, showError]);
 
   const newProject = useCallback(() => {
     if (!window.confirm("Discard the current session and start a blank project?")) return;
@@ -618,11 +648,20 @@ export default function App(): JSX.Element {
                     <td style={{ whiteSpace: "nowrap" }}>
                       {j.state === "done" && <button style={btn} onClick={() => renodeCmd("ImportRenodeTrace", { type: "ImportRenodeTrace", jobId: j.jobId })}>Import trace</button>}
                       {j.state === "running" && <button style={btn} onClick={() => renodeCmd("CancelRenodeJob", { type: "CancelRenodeJob", jobId: j.jobId })}>Cancel</button>}
+                      {(j.state === "done" || j.state === "failed" || j.state === "running") && <button style={btn} onClick={() => loadJobLog(j.jobId)}>{logJobId === j.jobId ? "Hide log" : "Log"}</button>}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+          )}
+          {logJobId !== null && (
+            <pre aria-label="firmware log" style={{ background: "#111827", borderRadius: 8, padding: 10, fontSize: 12, maxHeight: 220, overflow: "auto", whiteSpace: "pre-wrap" }}>
+              {`job ${logJobId} firmware log (last ${logLines.length} of ${logTotal} lines):\n` +
+                (logLines.length > 0
+                  ? logLines.map((l) => `[${l.machine}] ${l.message}`).join("\n")
+                  : "(no firmware output captured)")}
+            </pre>
           )}
         </section>
       )}

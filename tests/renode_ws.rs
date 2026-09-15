@@ -99,6 +99,20 @@ fn live_renode_job_imports_firmware_traffic() {
         text.contains("\"Standard\":291"),
         "firmware id must reach the stream"
     );
+
+    // Capped firmware log: boot + TX lines from the finished job.
+    let req = format!(r#"{{"type":"GetRenodeLog","jobId":{job_id},"lastN":50}}"#);
+    let log = rpc(&mut ws, &req);
+    assert_eq!(log["type"], "RenodeLog", "{log}");
+    let log_text = serde_json::to_string(&log["lines"]).unwrap();
+    assert!(
+        log_text.contains("CANLAB TX BOOT"),
+        "boot line must be in the log"
+    );
+    assert!(
+        log_text.contains("CAN TX OK"),
+        "TX lines must be in the log"
+    );
 }
 
 /// Cancelling a running job shuts the emulator down gracefully and fast —

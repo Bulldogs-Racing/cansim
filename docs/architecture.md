@@ -76,6 +76,6 @@ docs/             user + developer documentation
 - [x] Export slice — PCAP export (`DLT_CAN_SOCKETCAN`, simulated timestamps, EFF/RTR flags incl. RTR-aware analyzer rows + inspector), verified by byte-level parse-back
 - [x] Phase 12 (slice 1) — DBC subset: message/signal parsing + Intel/Motorola decoding + `canlab dbc` CLI (`docs/dbc.md`, `examples/vehicle.dbc`; multiplexing deferred)
 - [x] Portability slice — `canlab package`: validated shareable closures (firmware + dbc/assets, missing firmware is fatal, revalidates from its new home)
-- [x] Phase 4 (WS part, slice 2) — job cancellation: CancelRenodeJob trips a flag the emulator thread polls (graceful shutdown, `cancelled` state, partials discarded; live-verified). Still deferred: per-job UART over WS, Renode console/debugger (§50–§51)
+- [x] Phase 4 (WS part, slice 2) — job cancellation (flag polled by the emulator thread; graceful shutdown, `cancelled` state, partials discarded; live-verified) + capped per-job UART over WS (`GetRenodeLog`, last-200 bound, GUI Log viewer; live-verified). Still deferred: Renode console/debugger (§50–§51)
 - [ ] Phase 7 — accuracy-first MCP2515 virtual execution + SPI timing
 - [ ] Phase 6+ — analyzer sorting/search, Teensy, faults, FD, DBC

@@ -305,6 +305,24 @@ fn dispatch(state: &Arc<Mutex<ServerState>>, text: &str) -> ServerMsg {
         ClientMsg::ListRenodeJobs => ServerMsg::RenodeJobList {
             jobs: s.jobs.list().iter().map(|r| job_info(r)).collect(),
         },
+        ClientMsg::GetRenodeLog { jobId, lastN } => {
+            match s.jobs.log_tail(jobId, lastN.unwrap_or(50)) {
+                Ok((total, uart)) => ServerMsg::RenodeLog {
+                    jobId,
+                    total,
+                    lines: uart
+                        .into_iter()
+                        .map(|u| super::proto::UartLine {
+                            machine: u.machine,
+                            message: u.message,
+                        })
+                        .collect(),
+                },
+                Err(e) => ServerMsg::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
         ClientMsg::ImportRenodeTrace { jobId } => import_renode_trace(&mut s, jobId),
     }
 }

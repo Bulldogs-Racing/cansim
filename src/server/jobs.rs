@@ -18,7 +18,7 @@
 //! [`MAX_KEPT_JOBS`] finished records are kept — older ones are evicted
 //! and later polls/imports report [`JobError::UnknownJob`].
 
-use crate::backends::api::{BackendError, BackendOutcome};
+use crate::backends::api::{BackendError, BackendOutcome, ObservedUart};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -26,6 +26,9 @@ use thiserror::Error;
 
 /// Finished records kept per server lifetime (running jobs are never evicted).
 pub const MAX_KEPT_JOBS: usize = 32;
+
+/// Max UART lines one log reply carries (chatty-firmware bound).
+pub const MAX_LOG_LINES: usize = 200;
 
 /// Actionable job-table errors (§68).
 #[derive(Debug, Error)]
@@ -202,6 +205,21 @@ impl JobTable {
         })
     }
 
+    /// Last `n` UART lines of a finished job (running jobs report what
+    /// they have so far; cancelled jobs have none — partials discarded).
+    /// Capped server-side so a chatty firmware can never blow up a reply.
+    pub fn log_tail(&self, id: u64, n: usize) -> Result<(u64, Vec<ObservedUart>), JobError> {
+        let rec = self.get(id)?;
+        let all: &[ObservedUart] = rec
+            .outcome
+            .as_ref()
+            .map(|o| o.uart.as_slice())
+            .unwrap_or(&[]);
+        let take = n.clamp(1, MAX_LOG_LINES);
+        let skip = all.len().saturating_sub(take);
+        Ok((all.len() as u64, all[skip..].to_vec()))
+    }
+
     /// All records, oldest first.
     pub fn list(&self) -> Vec<&JobRecord> {
         self.jobs.values().collect()
@@ -303,5 +321,31 @@ mod tests {
         assert!(matches!(t.get(1), Err(JobError::UnknownJob { .. })));
         let err = t.get(1).unwrap_err();
         assert!(err.to_string().contains("evicted"));
+    }
+
+    #[test]
+    fn log_tail_caps_and_reports_totals() {
+        use crate::backends::api::ObservedUart;
+        let mut t = JobTable::new(4);
+        let a = t.try_start("a.canlab".into(), 30).unwrap();
+        // Running job, nothing observed yet: empty tail, total 0.
+        assert_eq!(t.log_tail(a, 10).unwrap(), (0, vec![]));
+        let mut out = outcome_with(0, 0);
+        out.uart = (0..5)
+            .map(|i| ObservedUart {
+                machine: "m".into(),
+                message: format!("line{i}"),
+            })
+            .collect();
+        t.finish(a, Ok(out));
+        let (total, tail) = t.log_tail(a, 2).unwrap();
+        assert_eq!(total, 5);
+        assert_eq!(
+            tail.iter().map(|u| u.message.as_str()).collect::<Vec<_>>(),
+            vec!["line3", "line4"]
+        );
+        // Oversized requests clamp, they don't error.
+        assert_eq!(t.log_tail(a, 10_000).unwrap().1.len(), 5);
+        assert!(t.log_tail(999, 5).is_err());
     }
 }

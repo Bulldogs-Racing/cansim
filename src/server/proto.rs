@@ -142,6 +142,14 @@ pub enum ClientMsg {
     CancelRenodeJob {
         jobId: u64,
     },
+    /// Last UART lines of a job (running jobs report what they have so
+    /// far). `lastN` defaults to 50, capped server-side at 200 — full logs
+    /// stay CLI-only.
+    GetRenodeLog {
+        jobId: u64,
+        #[serde(default)]
+        lastN: Option<usize>,
+    },
     /// List background firmware runs, oldest first.
     ListRenodeJobs,
     /// Replay a finished job's observed TX frames through the session
@@ -204,6 +212,11 @@ pub enum ServerMsg {
         received: u64,
         nextSeq: usize,
     },
+    RenodeLog {
+        jobId: u64,
+        total: u64,
+        lines: Vec<UartLine>,
+    },
     Pong,
     Error {
         message: String,
@@ -223,6 +236,13 @@ pub struct JobInfo {
     pub transmitted: u64,
     pub received: u64,
     pub error: Option<String>,
+}
+
+/// One firmware UART line over the wire (see `GetRenodeLog`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UartLine {
+    pub machine: String,
+    pub message: String,
 }
 
 /// One log entry with its sequence number (index in the session log).
@@ -363,6 +383,8 @@ mod tests {
             r#"{"type":"StartRenodeRun","path":"renode.canlab","runSecs":45}"#,
             r#"{"type":"GetRenodeJob","jobId":2}"#,
             r#"{"type":"CancelRenodeJob","jobId":2}"#,
+            r#"{"type":"GetRenodeLog","jobId":2}"#,
+            r#"{"type":"GetRenodeLog","jobId":2,"lastN":20}"#,
             r#"{"type":"ListRenodeJobs"}"#,
             r#"{"type":"ImportRenodeTrace","jobId":2}"#,
         ] {

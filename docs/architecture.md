@@ -75,6 +75,6 @@ docs/             user + developer documentation
 - [x] Observability slice — `canlab replay`: deterministic headless re-run of `--export-json` traces (bit-identical logs, verified by replay-of-replay diff)
 - [x] Export slice — PCAP export (`DLT_CAN_SOCKETCAN`, simulated timestamps, EFF/RTR flags incl. RTR-aware analyzer rows + inspector), verified by byte-level parse-back
 - [x] Phase 12 (slice 1) — DBC subset: message/signal parsing + Intel/Motorola decoding + `canlab dbc` CLI (`docs/dbc.md`, `examples/vehicle.dbc`; multiplexing deferred)
-- [ ] Phase 4 (WS part, slice 2) — job cancellation, per-job UART over WS, Renode console/debugger surfacing (§50–§51)
+- [x] Phase 4 (WS part, slice 2) — job cancellation: CancelRenodeJob trips a flag the emulator thread polls (graceful shutdown, `cancelled` state, partials discarded; live-verified). Still deferred: per-job UART over WS, Renode console/debugger (§50–§51)
 - [ ] Phase 7 — accuracy-first MCP2515 virtual execution + SPI timing
 - [ ] Phase 6+ — analyzer sorting/search, Teensy, faults, FD, DBC

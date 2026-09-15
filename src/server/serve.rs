@@ -10,7 +10,6 @@
 use super::jobs::{JobRecord, JobState, JobTable};
 use super::proto::{parse_client_msg, seq_event, state_name, ClientMsg, JobInfo, ServerMsg};
 use super::session::Session;
-use crate::backends::api::McuBackend;
 use crate::backends::renode::{spec_from_project, RenodeBackend};
 use crate::project::{validate_project, Project};
 use std::net::TcpListener;
@@ -292,6 +291,17 @@ fn dispatch(state: &Arc<Mutex<ServerState>>, text: &str) -> ServerMsg {
                 message: e.to_string(),
             },
         },
+        ClientMsg::CancelRenodeJob { jobId } => match s.jobs.cancel(jobId) {
+            Ok(()) => match s.jobs.get(jobId) {
+                Ok(rec) => ServerMsg::RenodeJob { job: job_info(rec) },
+                Err(e) => ServerMsg::Error {
+                    message: e.to_string(),
+                },
+            },
+            Err(e) => ServerMsg::Error {
+                message: e.to_string(),
+            },
+        },
         ClientMsg::ListRenodeJobs => ServerMsg::RenodeJobList {
             jobs: s.jobs.list().iter().map(|r| job_info(r)).collect(),
         },
@@ -328,9 +338,9 @@ fn start_renode_job(
             }
         }
     };
-    let job_id = {
+    let (job_id, cancel) = {
         let mut st = state.lock().unwrap();
-        match st
+        let id = match st
             .jobs
             .try_start(project_path.display().to_string(), spec.run_secs)
         {
@@ -340,11 +350,14 @@ fn start_renode_job(
                     message: e.to_string(),
                 }
             }
-        }
+        };
+        // try_start just inserted it; the lookup cannot fail.
+        let flag = Arc::clone(&st.jobs.get(id).expect("job just started").cancel);
+        (id, flag)
     };
     let shared = Arc::clone(state);
     std::thread::spawn(move || {
-        let result = backend.run(&spec).map_err(|e| e.to_string());
+        let result = backend.run_cancelable(&spec, &cancel);
         shared.lock().unwrap().jobs.finish(job_id, result);
     });
     ServerMsg::RenodeJobStarted { jobId: job_id }
@@ -399,6 +412,11 @@ fn import_renode_trace(s: &mut ServerState, job_id: u64) -> ServerMsg {
                     "Renode job {job_id} failed: {}",
                     rec.error.as_deref().unwrap_or("unknown error")
                 ),
+            }
+        }
+        JobState::Cancelled => {
+            return ServerMsg::Error {
+                message: format!("Renode job {job_id} was cancelled — no trace to import"),
             }
         }
         JobState::Done => {}

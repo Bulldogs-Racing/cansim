@@ -100,3 +100,58 @@ fn live_renode_job_imports_firmware_traffic() {
         "firmware id must reach the stream"
     );
 }
+
+/// Cancelling a running job shuts the emulator down gracefully and fast —
+/// no waiting out the budget, no Done with partial counts.
+#[test]
+#[ignore]
+fn live_renode_job_cancel_stops_the_run() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if !root
+        .join("firmware/tests/stm32_can/build/can_tx.elf")
+        .is_file()
+    {
+        eprintln!("SKIP: fixture ELFs not built; run ./firmware/tests/stm32_can/build.sh first");
+        return;
+    }
+
+    let port = serve_ephemeral(Arc::new(Mutex::new(ServerState::new(1))));
+    let (mut ws, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}")).unwrap();
+
+    let req = serde_json::json!({"type": "StartRenodeRun", "path": "firmware/tests/stm32_can/two_nodes.canlab.yaml", "runSecs": 120}).to_string();
+    let started = rpc(&mut ws, &req);
+    assert_eq!(started["type"], "RenodeJobStarted", "{started}");
+    let job_id = started["jobId"].as_u64().unwrap();
+
+    // Let the emulator boot so cancel interrupts a real run, not startup.
+    std::thread::sleep(std::time::Duration::from_secs(8));
+    let req = format!(r#"{{"type":"CancelRenodeJob","jobId":{job_id}}}"#);
+    let ack = rpc(&mut ws, &req);
+    assert_eq!(ack["type"], "RenodeJob", "{ack}");
+
+    // Poll to cancelled — must beat the 120 s budget by a mile.
+    let req = format!(r#"{{"type":"GetRenodeJob","jobId":{job_id}}}"#);
+    let mut state = String::new();
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let job = rpc(&mut ws, &req);
+        state = job["job"]["state"].as_str().unwrap().to_string();
+        if state != "running" {
+            break;
+        }
+    }
+    assert_eq!(
+        state,
+        "cancelled",
+        "job did not cancel; last poll: {}",
+        rpc(&mut ws, &req)
+    );
+
+    // A cancelled job has no trace to import, and cannot cancel twice.
+    let req = format!(r#"{{"type":"ImportRenodeTrace","jobId":{job_id}}}"#);
+    assert_eq!(rpc(&mut ws, &req)["type"], "Error");
+    let req = format!(r#"{{"type":"CancelRenodeJob","jobId":{job_id}}}"#);
+    let err = rpc(&mut ws, &req);
+    assert_eq!(err["type"], "Error");
+    assert!(err["message"].as_str().unwrap().contains("cancelled"));
+}

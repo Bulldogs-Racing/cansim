@@ -310,6 +310,8 @@ export default function App(): JSX.Element {
         setSummary(`Renode job ${reply.jobId} started — polling until it finishes.`);
       } else if (reply.type === "TraceImported") {
         setSummary(`Imported firmware traffic: ${reply.transmitted} transmitted, ${reply.received} received.`);
+      } else if (reply.type === "RenodeJob") {
+        setSummary(`Renode job ${reply.job.jobId} is ${reply.job.state}.`);
       }
       // Same fetch-then-adopt as runCmd: import appends before Status is read.
       await pollEvents();
@@ -606,14 +608,17 @@ export default function App(): JSX.Element {
                     <td>{j.jobId}</td>
                     <td style={{ fontFamily: "monospace" }}>{j.project}</td>
                     <td>
-                      <span style={{ padding: "2px 10px", borderRadius: 999, background: j.state === "done" ? "#14532d" : j.state === "failed" ? "#7f1d1d" : "#1f2937", border: "1px solid #374151" }}>
+                      <span style={{ padding: "2px 10px", borderRadius: 999, background: j.state === "done" ? "#14532d" : j.state === "failed" ? "#7f1d1d" : j.state === "cancelled" ? "#713f12" : "#1f2937", border: "1px solid #374151" }}>
                         ● {j.state}
                       </span>
                     </td>
                     <td>{j.transmitted}</td>
                     <td>{j.received}</td>
                     <td style={{ color: "#fca5a5", maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={j.error ?? ""}>{j.error ?? ""}</td>
-                    <td>{j.state === "done" && <button style={btn} onClick={() => renodeCmd("ImportRenodeTrace", { type: "ImportRenodeTrace", jobId: j.jobId })}>Import trace</button>}</td>
+                    <td style={{ whiteSpace: "nowrap" }}>
+                      {j.state === "done" && <button style={btn} onClick={() => renodeCmd("ImportRenodeTrace", { type: "ImportRenodeTrace", jobId: j.jobId })}>Import trace</button>}
+                      {j.state === "running" && <button style={btn} onClick={() => renodeCmd("CancelRenodeJob", { type: "CancelRenodeJob", jobId: j.jobId })}>Cancel</button>}
+                    </td>
                   </tr>
                 ))}
               </tbody>

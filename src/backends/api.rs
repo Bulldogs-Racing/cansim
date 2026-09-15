@@ -74,6 +74,9 @@ pub enum BackendError {
     #[error("Renode exited with status {status} before producing output.\n--- Renode output (tail) ---\n{tail}\n--- end ---\nFix: check the platform description and firmware paths above.")]
     EarlyExit { status: String, tail: String },
 
+    #[error("firmware run cancelled by the user before the budget elapsed (partial observations discarded — cancel early, import never).")]
+    Cancelled,
+
     #[error("I/O error during backend run: {0}")]
     Io(String),
 }

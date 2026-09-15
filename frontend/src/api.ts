@@ -33,6 +33,7 @@ export type ClientMsg =
   | { type: "RemoveMessage"; index: number }
   | { type: "StartRenodeRun"; path: string; runSecs?: number }
   | { type: "GetRenodeJob"; jobId: number }
+  | { type: "CancelRenodeJob"; jobId: number }
   | { type: "ListRenodeJobs" }
   | { type: "ImportRenodeTrace"; jobId: number };
 
@@ -144,7 +145,7 @@ export interface RenodeJob {
   jobId: number;
   project: string;
   runSecs: number;
-  state: "running" | "done" | "failed";
+  state: "running" | "done" | "failed" | "cancelled";
   transmitted: number;
   received: number;
   error: string | null;

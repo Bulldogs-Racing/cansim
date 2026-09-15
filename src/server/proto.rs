@@ -136,6 +136,12 @@ pub enum ClientMsg {
     GetRenodeJob {
         jobId: u64,
     },
+    /// Request cancellation of a running firmware run (async: the record
+    /// turns `cancelled` on the emulator thread's next tick). Replies the
+    /// current `RenodeJob`; already-finished jobs are an `Error`.
+    CancelRenodeJob {
+        jobId: u64,
+    },
     /// List background firmware runs, oldest first.
     ListRenodeJobs,
     /// Replay a finished job's observed TX frames through the session
@@ -356,6 +362,7 @@ mod tests {
             r#"{"type":"StartRenodeRun","path":"renode.canlab"}"#,
             r#"{"type":"StartRenodeRun","path":"renode.canlab","runSecs":45}"#,
             r#"{"type":"GetRenodeJob","jobId":2}"#,
+            r#"{"type":"CancelRenodeJob","jobId":2}"#,
             r#"{"type":"ListRenodeJobs"}"#,
             r#"{"type":"ImportRenodeTrace","jobId":2}"#,
         ] {

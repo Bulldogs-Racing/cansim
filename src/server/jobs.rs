@@ -18,8 +18,10 @@
 //! [`MAX_KEPT_JOBS`] finished records are kept — older ones are evicted
 //! and later polls/imports report [`JobError::UnknownJob`].
 
-use crate::backends::api::BackendOutcome;
+use crate::backends::api::{BackendError, BackendOutcome};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Finished records kept per server lifetime (running jobs are never evicted).
@@ -32,6 +34,8 @@ pub enum JobError {
     TableFull { running: usize, max: u16 },
     #[error("unknown Renode job {id} (only the newest {kept} finished jobs are kept; older ones are evicted)")]
     UnknownJob { id: u64, kept: usize },
+    #[error("Renode job {id} already {state} — only running jobs can be cancelled")]
+    AlreadyFinished { id: u64, state: &'static str },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +43,7 @@ pub enum JobState {
     Running,
     Done,
     Failed,
+    Cancelled,
 }
 
 impl JobState {
@@ -47,7 +52,12 @@ impl JobState {
             JobState::Running => "running",
             JobState::Done => "done",
             JobState::Failed => "failed",
+            JobState::Cancelled => "cancelled",
         }
+    }
+
+    fn finished(self) -> bool {
+        self != JobState::Running
     }
 }
 
@@ -63,6 +73,9 @@ pub struct JobRecord {
     pub received: u64,
     pub error: Option<String>,
     pub outcome: Option<BackendOutcome>,
+    /// Tripped by [`JobTable::cancel`]; the emulator thread polls it every
+    /// 100 ms and shuts down gracefully on the next tick.
+    pub cancel: Arc<AtomicBool>,
 }
 
 /// Background firmware runs. Not thread-safe itself — the server wraps it
@@ -118,33 +131,61 @@ impl JobTable {
                 received: 0,
                 error: None,
                 outcome: None,
+                cancel: Arc::new(AtomicBool::new(false)),
             },
         );
         Ok(id)
     }
 
-    /// Store a finished run's observations (or its failure). Evicts the
-    /// oldest finished records beyond [`MAX_KEPT_JOBS`].
-    pub fn finish(&mut self, id: u64, result: Result<BackendOutcome, String>) {
+    /// Request cancellation of a running job (async: the emulator thread
+    /// shuts down gracefully on its next 100 ms tick, then the record
+    /// becomes `cancelled`). Finished jobs fail loudly instead of
+    /// pretending to cancel.
+    pub fn cancel(&self, id: u64) -> Result<(), JobError> {
+        let rec = self.get(id)?;
+        if rec.state != JobState::Running {
+            return Err(JobError::AlreadyFinished {
+                id,
+                state: rec.state.name(),
+            });
+        }
+        rec.cancel.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Store a finished run's observations (or its failure). A
+    /// [`BackendError::Cancelled`] run becomes `cancelled`, never `done`
+    /// with partial counts. Evicts the oldest finished records beyond
+    /// [`MAX_KEPT_JOBS`].
+    pub fn finish(&mut self, id: u64, result: Result<BackendOutcome, BackendError>) {
         let Some(job) = self.jobs.get_mut(&id) else {
             return;
         };
         match result {
             Ok(outcome) => {
-                job.transmitted = outcome.tx_frames.len() as u64;
-                job.received = outcome.rx_frames.len() as u64;
-                job.state = JobState::Done;
-                job.outcome = Some(outcome);
+                // A cancel that lands after natural completion loses the
+                // race honestly: the run really did finish.
+                if job.cancel.load(Ordering::Relaxed) {
+                    job.state = JobState::Cancelled;
+                } else {
+                    job.transmitted = outcome.tx_frames.len() as u64;
+                    job.received = outcome.rx_frames.len() as u64;
+                    job.state = JobState::Done;
+                    job.outcome = Some(outcome);
+                }
             }
-            Err(error) => {
+            Err(BackendError::Cancelled) => {
+                job.state = JobState::Cancelled;
+            }
+            Err(e) => {
                 job.state = JobState::Failed;
-                job.error = Some(error);
+                job.error = Some(e.to_string());
             }
         }
         let mut finished: Vec<u64> = self
             .jobs
             .values()
-            .filter(|j| j.state != JobState::Running)
+            .filter(|j| j.state.finished())
             .map(|j| j.id)
             .collect();
         finished.sort_unstable();
@@ -217,10 +258,36 @@ mod tests {
         assert_eq!((rec.transmitted, rec.received), (3, 2));
         assert!(rec.outcome.is_some());
         let b = t.try_start("b.canlab".into(), 30).unwrap();
-        t.finish(b, Err("boom".into()));
+        t.finish(b, Err(BackendError::Io("boom".into())));
         let rec = t.get(b).unwrap();
         assert_eq!(rec.state, JobState::Failed);
-        assert_eq!(rec.error.as_deref(), Some("boom"));
+        assert_eq!(
+            rec.error.as_deref(),
+            Some("I/O error during backend run: boom")
+        );
+    }
+
+    #[test]
+    fn cancel_trips_the_flag_and_finish_honors_it() {
+        let mut t = JobTable::new(4);
+        let a = t.try_start("a.canlab".into(), 30).unwrap();
+        t.cancel(a).unwrap();
+        assert!(t.get(a).unwrap().cancel.load(Ordering::Relaxed));
+        // Cancellation before completion: no Done with partial counts.
+        t.finish(a, Ok(outcome_with(3, 2)));
+        let rec = t.get(a).unwrap();
+        assert_eq!(rec.state, JobState::Cancelled);
+        assert_eq!((rec.transmitted, rec.received), (0, 0));
+        assert!(rec.outcome.is_none());
+        // Cancelling a finished job fails loudly.
+        let err = t.cancel(a).unwrap_err();
+        assert!(matches!(err, JobError::AlreadyFinished { .. }));
+        assert!(err.to_string().contains("cancelled"));
+        assert!(matches!(t.cancel(999), Err(JobError::UnknownJob { .. })));
+        // The backend's own Cancelled error maps the same way.
+        let b = t.try_start("b.canlab".into(), 30).unwrap();
+        t.finish(b, Err(BackendError::Cancelled));
+        assert_eq!(t.get(b).unwrap().state, JobState::Cancelled);
     }
 
     #[test]

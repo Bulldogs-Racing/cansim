@@ -43,7 +43,8 @@ canlab serve --port 21011 [--project <file>]
 | `UpdateMessage { index, message }` | `Status` | Replaces the frame at `index`. |
 | `RemoveMessage { index }` | `Status` | Deletes the frame at `index` (later rows shift — see `bugs.md`). |
 | `StartRenodeRun { path, runSecs? }` | `RenodeJobStarted { jobId }` | Validates an all-`renode` project file and starts a supervised firmware run on a background thread (prompt reply, never blocks). `runSecs` defaults to 30. Refused when the `--max-jobs` running budget is exhausted. |
-| `GetRenodeJob { jobId }` | `RenodeJob { job }` | One job: `state` (`running`/`done`/`failed`), TX/RX counts, `error`. |
+| `GetRenodeJob { jobId }` | `RenodeJob { job }` | One job: `state` (`running`/`done`/`failed`/`cancelled`), TX/RX counts, `error`. |
+| `CancelRenodeJob { jobId }` | `RenodeJob { job }` | Trips the job's cancel flag (async shutdown on the emulator thread's next tick). Already-finished jobs are an `Error`. |
 | `ListRenodeJobs` | `RenodeJobList { jobs }` | All jobs, oldest first. The GUI polls this alongside events. |
 | `ImportRenodeTrace { jobId }` | `TraceImported { transmitted, received, nextSeq }` | Replays a `done` job's observed TX frames through the session engine (batch-inject at current engine time) so the analyzer shows firmware traffic. Fails while `running`, surfaces the job error when `failed`, and requires the session to contain the observed senders. |
 

@@ -23,6 +23,7 @@ use crate::project::Project;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -99,6 +100,21 @@ impl McuBackend for RenodeBackend {
     }
 
     fn run(&self, spec: &RenodeRunSpec) -> Result<BackendOutcome, BackendError> {
+        let never = AtomicBool::new(false);
+        self.run_cancelable(spec, &never)
+    }
+}
+
+impl RenodeBackend {
+    /// Supervised run that aborts early when `cancel` trips (WS job
+    /// cancellation): graceful emulator shutdown, then
+    /// [`BackendError::Cancelled`] — partial observations are discarded,
+    /// never presented as a complete run.
+    pub fn run_cancelable(
+        &self,
+        spec: &RenodeRunSpec,
+        cancel: &AtomicBool,
+    ) -> Result<BackendOutcome, BackendError> {
         for node in &spec.nodes {
             Self::check_node(node)?;
         }
@@ -118,6 +134,7 @@ impl McuBackend for RenodeBackend {
             &["--disable-xwt", "--port", "0"],
             &[format!("include @{}", resc_path.display()), "start".into()],
             Duration::from_secs(spec.run_secs.max(1)),
+            cancel,
         )?;
         // Best-effort cleanup; the log is already captured in `output`.
         let _ = std::fs::remove_dir_all(&workdir);
@@ -381,7 +398,7 @@ fn create_workdir() -> std::io::Result<PathBuf> {
 }
 
 fn next_nonce() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::AtomicU64;
     static NONCE: AtomicU64 = AtomicU64::new(0);
     // Mix in nanos so concurrent CLI invocations (different pids covered
     // above; same pid impossible) still get unique dirs.
@@ -410,6 +427,7 @@ fn run_supervised(
     args: &[&str],
     extra_e: &[String],
     budget: Duration,
+    cancel: &AtomicBool,
 ) -> Result<String, BackendError> {
     let mut cmd = Command::new(binary);
     cmd.args(args);
@@ -488,6 +506,12 @@ fn run_supervised(
                 return finish(status, &stdout_buf, &stderr_buf);
             }
             None => {
+                if cancel.load(Ordering::Relaxed) {
+                    // User abort: same graceful shutdown as budget end, but
+                    // the partial log is discarded — Cancelled, not Done.
+                    let _ = shutdown(&mut child, threads, &stdout_buf, &stderr_buf);
+                    return Err(BackendError::Cancelled);
+                }
                 if start.elapsed() >= budget {
                     return shutdown(&mut child, threads, &stdout_buf, &stderr_buf);
                 }

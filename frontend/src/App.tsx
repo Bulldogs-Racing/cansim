@@ -24,6 +24,7 @@ import {
   RenodeJob,
   SeqEvent,
   ServerMsg,
+  WireFault,
 } from "./api";
 
 const MAX_ROWS = 500; // ring buffer (§67): UI never grows without bound
@@ -75,7 +76,7 @@ export default function App(): JSX.Element {
   const [canvasSel, setCanvasSel] = useState<string | null>(null);
   const [rows, setRows] = useState<AnalyzerRow[]>([]);
   const [filter, setFilter] = useState("");
-  const [dirFilter, setDirFilter] = useState<"all" | "TX" | "RX">("all");
+  const [dirFilter, setDirFilter] = useState<"all" | "TX" | "RX" | "DROP">("all");
   const [paused, setPaused] = useState(false);
   const [renodePath, setRenodePath] = useState("firmware/tests/stm32_can/two_nodes.canlab.yaml");
   const [runSecsText, setRunSecsText] = useState("30");
@@ -236,6 +237,8 @@ export default function App(): JSX.Element {
       }
       if (reply.type === "RunSummary") {
         setSummary(`${reply.transmitted} transmitted, ${reply.received} received`);
+      } else if (reply.type === "FaultInjected") {
+        setSummary(`Fault injected: ${reply.error ?? "decoded clean"} — ${reply.receivers} receiver(s).`);
       }
       // Fetch-then-adopt: Start/Inject/Step append events BEFORE the Status
       // reply is read, so poll with the pre-Status cursor first — adopting
@@ -600,15 +603,25 @@ export default function App(): JSX.Element {
         </section>
       )}
 
+      {connected && nodes.length > 0 && (
+        <FaultPanel
+          key={nodes.map((n) => n.id).join(",")}
+          nodes={nodes}
+          onFault={(sender, id, data, extended, fault) =>
+            runCmd("InjectFault", { type: "InjectFault", sender, id, data, extended, fault })}
+        />
+      )}
+
       <section aria-label="can analyzer" style={{ background: "#0b1220", borderRadius: 12, border: "1px solid #1f2937", padding: 12 }}>
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
           <h2 style={{ margin: 0, fontSize: 16 }}>CAN Analyzer</h2>
           {paused && <span aria-label="capture paused" style={{ padding: "2px 10px", borderRadius: 999, background: "#713f12", border: "1px solid #a16207" }}>⏸ paused</span>}
           <input aria-label="filter by id or node" placeholder="filter: id or node" style={{ ...btn, cursor: "text" }} value={filter} onChange={(e) => setFilter(e.target.value)} />
-          <select aria-label="direction filter" title="TX/RX direction filter" style={btn} value={dirFilter} onChange={(e) => setDirFilter(e.target.value as "all" | "TX" | "RX")}>
-            <option value="all">TX+RX</option>
+          <select aria-label="direction filter" title="TX/RX/DROP direction filter" style={btn} value={dirFilter} onChange={(e) => setDirFilter(e.target.value as "all" | "TX" | "RX" | "DROP")}>
+            <option value="all">All</option>
             <option value="TX">TX only</option>
             <option value="RX">RX only</option>
+            <option value="DROP">DROP only</option>
           </select>
           <button style={btn} onClick={toggleCapture}>{paused ? "Resume capture" : "Pause capture"}</button>
           <button style={btn} onClick={clearAnalyzer}>Clear</button>
@@ -777,6 +790,101 @@ function MessagesPanel({ messages, nodes, onAdd, onUpdate, onRemove }: {
         </label>
         <button style={btn} onClick={submit}>{editing !== null ? "Update frame" : "＋ Add frame"}</button>
         {editing !== null && <button style={btn} onClick={cancelEdit}>Cancel</button>}
+      </div>
+      {formError && <p role="alert" style={{ color: "#fca5a5", margin: "8px 0 0" }}>{formError}</p>}
+    </section>
+  );
+}
+
+/** Single-shot fault injection (Phase 9): drive one corrupted/dropped frame.
+ *  Hex parsing mirrors MessagesPanel; the offset is a raw SOF..EOF bit
+ *  index (server validates it against the stuffed wire length). CorruptCrc
+ *  always surfaces a CRC error; DropFrame emits a DROP analyzer row. */
+function FaultPanel({ nodes, onFault }: {
+  nodes: ProjectNode[];
+  onFault: (sender: string, id: number, data: number[], extended: boolean, fault: WireFault) => void;
+}): JSX.Element {
+  const [sender, setSender] = useState(nodes[0]?.id ?? "");
+  const [idText, setIdText] = useState("0x123");
+  const [dataText, setDataText] = useState("01 02 03 04");
+  const [extended, setExtended] = useState(false);
+  const [faultKind, setFaultKind] = useState<"flip" | "crc" | "drop">("crc");
+  const [offsetText, setOffsetText] = useState("0");
+  const [formError, setFormError] = useState<string | null>(null);
+  const field: React.CSSProperties = { padding: 6, borderRadius: 6, border: "1px solid #374151", background: "#111827", color: "#e5e7eb" };
+  const btn: React.CSSProperties = { padding: "6px 12px", borderRadius: 6, border: "1px solid #374151", background: "#1f2937", color: "#e5e7eb", cursor: "pointer" };
+
+  const submit = () => {
+    setFormError(null);
+    if (!sender) {
+      setFormError("pick a sending node first");
+      return;
+    }
+    const id = Number(idText.trim().toLowerCase().startsWith("0x") ? idText.trim() : `0x${idText.trim()}`);
+    if (!Number.isInteger(id) || id < 0) {
+      setFormError(`"${idText}" is not a hex frame id (e.g. 0x123)`);
+      return;
+    }
+    const max = extended ? 0x1fffffff : 0x7ff;
+    if (id > max) {
+      setFormError(`0x${id.toString(16).toUpperCase()} exceeds the ${extended ? "29-bit extended" : "11-bit standard"} range`);
+      return;
+    }
+    const parts = dataText.trim() === "" ? [] : dataText.trim().split(/[\s,]+/);
+    const data: number[] = [];
+    for (const p of parts) {
+      const b = Number(`0x${p}`);
+      if (!Number.isInteger(b) || b < 0 || b > 0xff) {
+        setFormError(`"${p}" is not a hex byte (00–FF, space separated)`);
+        return;
+      }
+      data.push(b);
+    }
+    if (data.length > 8) {
+      setFormError("Classical CAN carries at most 8 data bytes");
+      return;
+    }
+    let fault: WireFault;
+    if (faultKind === "flip") {
+      const offset = Number(offsetText);
+      if (!Number.isInteger(offset) || offset < 0) {
+        setFormError(`"${offsetText}" is not a wire bit offset (integer >= 0)`);
+        return;
+      }
+      fault = { FlipBit: offset };
+    } else if (faultKind === "crc") {
+      fault = "CorruptCrc";
+    } else {
+      fault = "DropFrame";
+    }
+    onFault(sender, id, data, extended, fault);
+  };
+
+  return (
+    <section aria-label="fault injection" style={{ background: "#0b1220", borderRadius: 12, border: "1px solid #1f2937", padding: 12, marginBottom: 12 }}>
+      <h2 style={{ margin: "0 0 8px", fontSize: 16 }}>Fault injection</h2>
+      <p style={{ margin: "0 0 8px", color: "#9ca3af", fontSize: 13 }}>
+        Drive one corrupted frame now (deterministic, single-shot). Dropped frames appear as DROP rows
+        in the analyzer; error counters move on the bus. Probabilistic policies are deferred.
+      </p>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <select aria-label="sending node" style={field} value={sender} onChange={(e) => setSender(e.target.value)}>
+          {nodes.map((n) => <option key={n.id} value={n.id}>{n.id}</option>)}
+        </select>
+        <input aria-label="frame id in hex" title="hex frame id, e.g. 0x123" style={{ ...field, width: 90 }} value={idText} onChange={(e) => setIdText(e.target.value)} />
+        <input aria-label="data bytes in hex" title="space-separated hex bytes, e.g. 01 02 03 04" style={{ ...field, minWidth: 200 }} value={dataText} onChange={(e) => setDataText(e.target.value)} />
+        <label style={{ fontSize: 13 }}>
+          <input type="checkbox" checked={extended} onChange={(e) => setExtended(e.target.checked)} /> extended
+        </label>
+        <select aria-label="fault kind" title="FlipBit flips one SOF..EOF wire bit; CorruptCrc breaks the CRC; DropFrame drives nothing" style={field} value={faultKind} onChange={(e) => setFaultKind(e.target.value as "flip" | "crc" | "drop")}>
+          <option value="crc">Corrupt CRC</option>
+          <option value="flip">Flip wire bit</option>
+          <option value="drop">Drop frame</option>
+        </select>
+        {faultKind === "flip" && (
+          <input aria-label="wire bit offset" title="0-based SOF..EOF bit index (server validates against the wire length)" style={{ ...field, width: 90 }} value={offsetText} onChange={(e) => setOffsetText(e.target.value)} />
+        )}
+        <button style={btn} onClick={submit}>⚡ Inject fault</button>
       </div>
       {formError && <p role="alert" style={{ color: "#fca5a5", margin: "8px 0 0" }}>{formError}</p>}
     </section>

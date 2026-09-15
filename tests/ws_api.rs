@@ -273,6 +273,57 @@ fn ws_edit_save_flow() {
 }
 
 #[test]
+fn ws_inject_fault_reports_wire_truth() {
+    let dir = std::env::temp_dir().join(format!("canlab-ws-fault-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let proj = dir.join("p.canlab");
+    std::fs::write(&proj, PROJECT).unwrap();
+
+    let port = serve_ephemeral(Arc::new(Mutex::new(ServerState::new(1))));
+    let (mut ws, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}")).unwrap();
+    let req = serde_json::json!({"type": "Load", "path": proj.display().to_string()}).to_string();
+    assert_eq!(rpc(&mut ws, &req)["type"], "Status");
+    rpc(&mut ws, r#"{"type":"Start"}"#);
+
+    // Corrupt CRC: detection named on the wire, nobody delivers.
+    let rep = rpc(
+        &mut ws,
+        r#"{"type":"InjectFault","sender":"engine_ecu","id":291,"data":[1,2,3,4],"fault":"CorruptCrc"}"#,
+    );
+    assert_eq!(rep["type"], "FaultInjected");
+    assert_eq!(rep["error"], "Crc");
+    assert_eq!(rep["receivers"], 0);
+
+    // Drop: null error, zero receivers, visible FrameDropped event.
+    let rep = rpc(
+        &mut ws,
+        r#"{"type":"InjectFault","sender":"engine_ecu","id":291,"data":[9],"fault":"DropFrame"}"#,
+    );
+    assert_eq!(rep["type"], "FaultInjected");
+    assert_eq!(rep["error"], serde_json::Value::Null);
+    let events = rpc(&mut ws, r#"{"type":"GetEvents","sinceSeq":0}"#);
+    let text = serde_json::to_string(&events).unwrap();
+    assert!(
+        text.contains("FrameDropped"),
+        "dropped frames must reach the stream"
+    );
+
+    // Out-of-range offsets and unknown senders are Error replies.
+    let err = rpc(
+        &mut ws,
+        r#"{"type":"InjectFault","sender":"engine_ecu","id":291,"data":[],"fault":{"FlipBit":100000}}"#,
+    );
+    assert_eq!(err["type"], "Error");
+    let err = rpc(
+        &mut ws,
+        r#"{"type":"InjectFault","sender":"ghost","id":291,"data":[],"fault":"DropFrame"}"#,
+    );
+    assert_eq!(err["type"], "Error");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn ws_renode_jobs_reject_bad_input_without_emulator() {
     let dir = std::env::temp_dir().join(format!("canlab-ws-renode-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

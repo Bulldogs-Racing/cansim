@@ -9,6 +9,8 @@
 //! sync by hand until a generator earns its keep (field names are
 //! camelCase on the wire on both sides).
 
+use crate::can::bus::WireFault;
+use crate::can::errors::CanErrorKind;
 use crate::project::{MessageDecl, NodeDecl, Project};
 use crate::simulation::engine::EngineState;
 use crate::simulation::event::{SimEvent, SimEventKind};
@@ -46,6 +48,19 @@ pub enum ClientMsg {
         extended: bool,
         #[serde(default)]
         data: Vec<u8>,
+    },
+    /// Drive one deterministically faulted frame now (Phase 9, single-shot).
+    /// `fault` is the [`WireFault`] wire shape: `{"FlipBit": offset}`,
+    /// `"CorruptCrc"`, or `"DropFrame"`. Out-of-range offsets are an
+    /// `Error` reply — never silently clamped.
+    InjectFault {
+        sender: String,
+        id: u32,
+        #[serde(default)]
+        extended: bool,
+        #[serde(default)]
+        data: Vec<u8>,
+        fault: WireFault,
     },
     /// Ordered events with `seq >= sinceSeq`, plus the new cursor.
     GetEvents {
@@ -161,6 +176,11 @@ pub enum ServerMsg {
         nextSeq: usize,
     },
     Injected {
+        receivers: usize,
+        nextSeq: usize,
+    },
+    FaultInjected {
+        error: Option<CanErrorKind>,
         receivers: usize,
         nextSeq: usize,
     },

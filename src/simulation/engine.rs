@@ -4,7 +4,10 @@
 //! (`canlab simulate`) and future server/WebSocket layers drive it; the GUI
 //! is a view on top, never the simulation itself (§78).
 
-use crate::can::bus::{ArbitrationOutcome, BusError, CanBus, CanBusConfig, TransmissionOutcome};
+use crate::can::bus::{
+    ArbitrationOutcome, BusError, CanBus, CanBusConfig, FaultOutcome, TransmissionOutcome,
+    WireFault,
+};
 use crate::can::frame::CanFrame;
 use crate::can::timing::SimNanos;
 use crate::simulation::clock::SimClock;
@@ -139,6 +142,32 @@ impl Engine {
         let before = b.events().len();
         let outcome = b.transmit(sender, frame, t)?;
         // Mirror new bus events into the engine log.
+        let fresh: Vec<_> = b.events()[before..].to_vec();
+        for e in fresh {
+            self.log.push(SimEvent::at(t, SimEventKind::BusTraffic(e)));
+        }
+        self.clock.advance(b.frame_duration_ns(&outcome.frame));
+        Ok(outcome)
+    }
+
+    /// Drive one deterministically faulted frame (Phase 9, single-shot):
+    /// same event mirroring and clock step as [`Engine::transmit`], with the
+    /// bus-level fault applied. Out-of-range offsets fail as
+    /// [`BusError::FaultOffsetOutOfRange`] — never silently clamped.
+    pub fn transmit_with_fault(
+        &mut self,
+        bus: &str,
+        sender: &str,
+        frame: CanFrame,
+        fault: WireFault,
+    ) -> Result<FaultOutcome, EngineError> {
+        let t = self.clock.now();
+        let b = self
+            .buses
+            .get_mut(bus)
+            .ok_or_else(|| EngineError::UnknownBus(bus.into()))?;
+        let before = b.events().len();
+        let outcome = b.transmit_with_fault(sender, frame, fault, t)?;
         let fresh: Vec<_> = b.events()[before..].to_vec();
         for e in fresh {
             self.log.push(SimEvent::at(t, SimEventKind::BusTraffic(e)));

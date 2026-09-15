@@ -15,6 +15,7 @@ export type ClientMsg =
   | { type: "Reset" }
   | { type: "Step"; deltaNs: number }
   | { type: "Inject"; sender: string; id: number; extended?: boolean; data?: number[] }
+  | { type: "InjectFault"; sender: string; id: number; extended?: boolean; data?: number[]; fault: WireFault }
   | { type: "GetEvents"; sinceSeq?: number }
   | { type: "GetStatus" }
   | { type: "GetProject" }
@@ -34,6 +35,12 @@ export type ClientMsg =
   | { type: "GetRenodeJob"; jobId: number }
   | { type: "ListRenodeJobs" }
   | { type: "ImportRenodeTrace"; jobId: number };
+
+/** Wire shape of WireFault (externally-tagged Rust enum, Phase 9). */
+export type WireFault = { FlipBit: number } | "CorruptCrc" | "DropFrame";
+
+/** Detection kind observed on a faulted wire (unit variants). */
+export type CanErrorKind = "Bit" | "Stuff" | "Crc" | "Form" | "Ack";
 
 /** Wire shape of CanId (externally-tagged Rust enum). */
 export type WireCanId = { Standard: number } | { Extended: number };
@@ -150,6 +157,7 @@ export type ServerMsg =
   | { type: "RunSummary"; transmitted: number; received: number; nextSeq: number }
   | { type: "Stepped"; nowNs: number; nextSeq: number }
   | { type: "Injected"; receivers: number; nextSeq: number }
+  | { type: "FaultInjected"; error: CanErrorKind | null; receivers: number; nextSeq: number }
   | { type: "RenodeJobStarted"; jobId: number }
   | { type: "RenodeJob"; job: RenodeJob }
   | { type: "RenodeJobList"; jobs: RenodeJob[] }
@@ -227,7 +235,7 @@ export function fmtTimeNs(ns: number): string {
 export interface AnalyzerRow {
   seq: number;
   timeNs: number;
-  dir: "TX" | "RX";
+  dir: "TX" | "RX" | "DROP";
   node: string;
   id: string;
   dlc: number;
@@ -249,6 +257,9 @@ export function analyzerRows(events: SeqEvent[]): AnalyzerRow[] {
     } else if ("FrameReceived" in inner) {
       const { receiver, frame } = inner.FrameReceived;
       rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "RX", node: receiver, id: idToHex(frame.id), dlc: frame.dlc, data: bytesToHex(frame.data) });
+    } else if ("FrameDropped" in inner) {
+      const { sender, frame } = inner.FrameDropped;
+      rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "DROP", node: sender, id: idToHex(frame.id), dlc: frame.dlc, data: bytesToHex(frame.data) });
     }
   }
   return rows;

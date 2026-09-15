@@ -191,6 +191,22 @@ fn dispatch(state: &Arc<Mutex<ServerState>>, text: &str) -> ServerMsg {
                 message: e.to_string(),
             },
         },
+        ClientMsg::InjectFault {
+            sender,
+            id,
+            extended,
+            data,
+            fault,
+        } => match s.session.inject_fault(&sender, id, extended, &data, fault) {
+            Ok(rep) => ServerMsg::FaultInjected {
+                error: rep.error,
+                receivers: rep.receivers,
+                nextSeq: s.session.events().len(),
+            },
+            Err(e) => ServerMsg::Error {
+                message: e.to_string(),
+            },
+        },
         ClientMsg::GetEvents { sinceSeq } => {
             let log = s.session.events();
             let from = sinceSeq.min(log.len());

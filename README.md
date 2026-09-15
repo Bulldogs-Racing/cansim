@@ -110,6 +110,10 @@ The GUI is a web app with three parts: a network **canvas**, run/simulation
   **Import trace** to replay observed firmware frames into the analyzer.
   Needs the fixture ELFs (`firmware/tests/stm32_can/build.sh`) and the
   dotnet runtime if your renode requires it (`canlab doctor` tells you).
+- **Fault injection**: drive one corrupted frame now (flip a wire bit,
+  corrupt the CRC, or drop the frame). Dropped frames show as DROP rows;
+  the outcome line names the detection kind. Details:
+  `docs/fault-injection.md`.
 - The API repo note in-app always assumes `canlab serve` runs from the repo
   root.
 

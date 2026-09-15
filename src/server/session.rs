@@ -10,7 +10,8 @@
 //! rejected with [`SessionError::RenodeOverApi`] — firmware runs stay in
 //! `canlab simulate` until WS-supervised emulator runs land.
 
-use crate::can::bus::{BusError, CanBusConfig};
+use crate::can::bus::{BusError, CanBusConfig, WireFault};
+use crate::can::errors::CanErrorKind;
 use crate::can::frame::CanFrame;
 use crate::can::id::CanId;
 use crate::can::timing::SimNanos;
@@ -96,6 +97,13 @@ impl From<BusError> for SessionError {
 pub struct RunSummary {
     pub transmitted: u64,
     pub received: u64,
+}
+
+/// Summary of one faulted ad-hoc frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaultReport {
+    pub error: Option<CanErrorKind>,
+    pub receivers: usize,
 }
 
 /// One loaded project: engine buses/nodes plus sender→bus routing for
@@ -521,6 +529,41 @@ impl Session {
         Ok(out.receivers.len())
     }
 
+    /// Outcome of one faulted ad-hoc frame (Phase 9, single-shot).
+    /// `error` is the detection kind observed on the wire (`None` for a
+    /// cleanly-decoding flip and for [`WireFault::DropFrame`]).
+    pub fn inject_fault(
+        &mut self,
+        sender: &str,
+        id: u32,
+        extended: bool,
+        data: &[u8],
+        fault: WireFault,
+    ) -> Result<FaultReport, SessionError> {
+        let bus = {
+            let loaded = self.loaded.as_ref().ok_or(SessionError::NoProject)?;
+            loaded
+                .node_bus
+                .get(sender)
+                .cloned()
+                .ok_or_else(|| SessionError::UnknownNode(sender.into(), known_nodes(loaded)))?
+        };
+        let can_id = if extended {
+            CanId::new_extended(id).map_err(|e| SessionError::BadFrame(e.to_string()))?
+        } else {
+            CanId::new_standard(id as u16).map_err(|e| SessionError::BadFrame(e.to_string()))?
+        };
+        let frame =
+            CanFrame::new(can_id, data).map_err(|e| SessionError::BadFrame(e.to_string()))?;
+        let out = self
+            .engine
+            .transmit_with_fault(&bus, sender, frame, fault)?;
+        Ok(FaultReport {
+            error: out.error,
+            receivers: out.receivers.len(),
+        })
+    }
+
     pub fn pause(&mut self) -> Result<(), SessionError> {
         self.require_loaded()?;
         self.engine.pause();
@@ -795,6 +838,56 @@ messages:
         assert!(t >= 1000);
         s.reset().unwrap();
         assert_eq!(s.state(), EngineState::Idle);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inject_fault_surfaces_wire_truth() {
+        use crate::can::bus::{BusEvent, BusEventKind, WireFault};
+        use crate::can::errors::CanErrorKind;
+        use crate::simulation::event::SimEventKind;
+
+        let dir = tmpdir("fault");
+        let path = write_project(&dir, "p.canlab", TWO_NODES);
+        let mut s = Session::new();
+        s.load(&path).unwrap();
+        s.start().unwrap();
+
+        // Corrupt CRC: receivers decode a CRC error, nobody delivers.
+        let rep = s
+            .inject_fault(
+                "engine_ecu",
+                0x123,
+                false,
+                &[1, 2, 3, 4],
+                WireFault::CorruptCrc,
+            )
+            .unwrap();
+        assert_eq!(rep.error, Some(CanErrorKind::Crc));
+        assert_eq!(rep.receivers, 0);
+
+        // Drop: no error kind, no receivers, but a visible FrameDropped event.
+        let rep = s
+            .inject_fault("engine_ecu", 0x123, false, &[1], WireFault::DropFrame)
+            .unwrap();
+        assert_eq!(rep.error, None);
+        assert_eq!(rep.receivers, 0);
+        assert!(s.events().iter().any(|e| matches!(
+            &e.kind,
+            SimEventKind::BusTraffic(BusEvent {
+                kind: BusEventKind::FrameDropped { .. },
+                ..
+            })
+        )));
+
+        // Out-of-range offsets fail loudly, never clamped.
+        assert!(s
+            .inject_fault("engine_ecu", 0x123, false, &[1], WireFault::FlipBit(10_000))
+            .is_err());
+        // Unknown senders and bad frames fail like inject.
+        assert!(s
+            .inject_fault("ghost", 0x123, false, &[1], WireFault::DropFrame)
+            .is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

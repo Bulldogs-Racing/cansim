@@ -5,6 +5,7 @@
 //! - `canlab replay <project> <trace.json>` — deterministically replay a
 //!   recorded event log (from `simulate --export-json`), no GUI (§54)
 //! - `canlab validate <project>` — schema + safety checks (§21)
+//! - `canlab dbc <file.dbc> --id 0x100 --data ...` — decode one payload (§38)
 //! - `canlab serve [--port N] [--project p]` — local WebSocket API for the
 //!   visual editor (§4); the GUI drives this, never the engine directly
 //! - `canlab doctor` — environment diagnostics (Renode, toolchains, SocketCAN)
@@ -52,6 +53,17 @@ enum Commands {
     },
     /// Validate a project file without simulating.
     Validate { project: PathBuf },
+    /// Decode one CAN payload with a DBC file (Phase 12 slice 1).
+    Dbc {
+        /// DBC file (message/signal layout).
+        dbc: PathBuf,
+        /// Message id in hex (e.g. 0x100).
+        #[arg(long)]
+        id: String,
+        /// Payload bytes in hex (e.g. "00 10 50 0A 00 00 00 00").
+        #[arg(long)]
+        data: String,
+    },
     /// Replay a recorded event-log trace deterministically (no GUI).
     Replay {
         /// Project file (routing: buses + nodes for the recorded senders).
@@ -90,6 +102,7 @@ fn main() {
             run_secs,
         } => cmd_simulate(&project, export_json.as_deref(), run_secs),
         Commands::Validate { project } => cmd_validate(&project),
+        Commands::Dbc { dbc, id, data } => cmd_dbc(&dbc, &id, &data),
         Commands::Replay {
             project,
             trace,
@@ -221,6 +234,65 @@ fn cmd_validate(path: &Path) -> i32 {
             0
         }
         None => 1,
+    }
+}
+
+/// Decode one payload with a DBC file: `canlab dbc vehicle.dbc
+/// --id 0x100 --data "00 10 50 0A 00 00 00 00"`.
+fn cmd_dbc(dbc_path: &Path, id_text: &str, data_text: &str) -> i32 {
+    use cansimcan::dbc::Dbc;
+    let dbc = match Dbc::load_from_file(dbc_path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let id_trimmed = id_text.trim();
+    let id_hex = if id_trimmed.to_lowercase().starts_with("0x") {
+        id_trimmed.to_string()
+    } else {
+        format!("0x{id_trimmed}")
+    };
+    let id = match u32::from_str_radix(id_hex.trim_start_matches("0x"), 16) {
+        Ok(id) => id,
+        Err(_) => {
+            eprintln!("bad --id \"{id_text}\": expected hex (e.g. 0x100)");
+            return 1;
+        }
+    };
+    let mut data = Vec::new();
+    if !data_text.trim().is_empty() {
+        for part in data_text.split(|c: char| c == ',' || c.is_whitespace()) {
+            if part.is_empty() {
+                continue;
+            }
+            match u8::from_str_radix(part, 16) {
+                Ok(b) => data.push(b),
+                Err(_) => {
+                    eprintln!("bad --data byte \"{part}\": expected hex bytes (e.g. \"00 10 50\")");
+                    return 1;
+                }
+            }
+        }
+    }
+    match dbc.decode(id, &data) {
+        Ok(signals) => {
+            let msg = dbc.message(id).expect("decoded message exists");
+            println!("{:#X} {} ({} signal(s)):", id, msg.name, signals.len());
+            for (name, value, unit) in signals {
+                if unit.is_empty() {
+                    println!("  {name} = {value}");
+                } else {
+                    println!("  {name} = {value} {unit}");
+                }
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
     }
 }
 

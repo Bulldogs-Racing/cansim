@@ -34,6 +34,7 @@ canlab new my-project                  # scaffold portable project dir
 canlab simulate project.canlab         # headless run (virtual or Renode)
 canlab simulate renode.canlab --run-secs 30 --export-json events.json
 canlab replay project.canlab events.json  # deterministically replay a recorded trace
+canlab dbc vehicle.dbc --id 0x100 --data "00 10 50 0A 00 00 00 00"  # decode a payload
 canlab serve --project project.canlab [--max-jobs 2]  # local WebSocket API for the GUI
 canlab validate project.canlab         # schema + safety checks
 canlab doctor                          # Renode / dotnet / toolchains / SocketCAN

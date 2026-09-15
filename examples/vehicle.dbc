@@ -1,0 +1,15 @@
+VERSION "canlab-example"
+
+NS_ :
+BS_ :
+
+BU_: ABS BMS Vector__XXX
+
+BO_ 256 EngineData: 8 Vector__XXX
+ SG_ Rpm : 0|16@1+ (0.125,0) [0|8191.875] "rpm" BMS
+ SG_ CoolantTemp : 16|8@1- (1,-40) [-40|215] "degC" BMS
+ SG_ Flags : 24|4@1+ (1,0) [0|15] "" ABS
+ SG_ BigSpeed : 7|12@0+ (0.1,0) [0|409.5] "km/h" ABS
+
+BO_ 512 Doors: 1 Vector__XXX
+ SG_ DriverDoor : 0|1@1+ (1,0) [0|1] "" ABS

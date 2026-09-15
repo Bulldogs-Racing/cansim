@@ -481,11 +481,10 @@ fn print_run_header(proj: &Project) {
     println!();
 }
 
-/// Shared headless timeline: fresh engine, all nodes on the first bus
-/// (multi-bus routing deferred, §72 — same note as before), one
-/// §75-style TX/RX line per frame, deterministic timestamps. Project
-/// fault policies apply unless `apply_faults` is false (replay reproduces
-/// the recorded traffic exactly instead of re-drawing faults).
+/// Shared headless timeline: fresh engine, every node on its own project
+/// bus, one §75-style TX/RX line per frame, deterministic timestamps.
+/// Project fault policies apply unless `apply_faults` is false (replay
+/// reproduces the recorded traffic exactly instead of re-drawing faults).
 fn run_virtual_timeline(
     proj: &Project,
     script: &[(String, CanFrame, Option<WireFault>)],
@@ -501,22 +500,15 @@ fn run_virtual_timeline(
             return 1;
         }
     }
-    // Phase 3 supports one bus per run; multi-bus topologies validate but
-    // need explicit routing (deferred with a clear message, §72).
-    if proj.buses.len() > 1 {
-        eprintln!(
-            "note: {} buses declared; this build simulates \"{}\" only. \
-             Multi-bus routing is deferred (explicit limitation, not silent).",
-            proj.buses.len(),
-            proj.buses[0].id
-        );
-    }
-    let bus = proj.buses[0].id.clone();
+    // Every node on its own project bus (multi-bus topologies route
+    // per attachment, like the live session — no cross-bus forwarding).
+    let mut node_bus = std::collections::HashMap::new();
     for n in &proj.nodes {
-        if let Err(e) = engine.register_node(&bus, &n.id) {
+        if let Err(e) = engine.register_node(&n.can.bus, &n.id) {
             eprintln!("failed to register node {}: {e}", n.id);
             return 1;
         }
+        node_bus.insert(n.id.clone(), n.can.bus.clone());
     }
     engine.set_fault_rules(fault_rules_from_project(proj));
     engine.set_faults_enabled(apply_faults);
@@ -526,6 +518,13 @@ fn run_virtual_timeline(
     let mut rx_count = 0u64;
 
     for (sender, frame, script_fault) in script {
+        let bus = match node_bus.get(sender) {
+            Some(b) => b.clone(),
+            None => {
+                eprintln!("transmission from {sender} failed: unknown node");
+                return 1;
+            }
+        };
         let t = engine.now();
         // Scripted drops (replay) re-drive explicitly; everything else goes
         // through the policy-aware transmit (rules off during replay).

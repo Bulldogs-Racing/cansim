@@ -1,0 +1,43 @@
+# Two isolated buses: frames stay on their sender's bus (no cross-bus
+# forwarding). a1 -> a2 on bus_a; b1 is alone on bus_b (no deliveries).
+version: 1
+
+simulation:
+  mode: deterministic
+
+buses:
+  - id: bus_a
+    type: can
+    bitrate: 500000
+    fd: false
+  - id: bus_b
+    type: can
+    bitrate: 250000
+    fd: false
+
+nodes:
+  - id: a1
+    device: stm32f103
+    backend: virtual
+    can:
+      bus: bus_a
+
+  - id: a2
+    device: arduino_uno
+    backend: virtual
+    can:
+      bus: bus_a
+
+  - id: b1
+    device: stm32f103
+    backend: virtual
+    can:
+      bus: bus_b
+
+messages:
+  - sender: a1
+    id: 0x100
+    data: [0x01]
+  - sender: b1
+    id: 0x200
+    data: [0x02]

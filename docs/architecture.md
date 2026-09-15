@@ -76,7 +76,8 @@ docs/             user + developer documentation
 - [x] Observability slice — `canlab replay`: deterministic headless re-run of `--export-json` traces (bit-identical logs, verified by replay-of-replay diff)
 - [x] Export slice — PCAP export (`DLT_CAN_SOCKETCAN`, simulated timestamps, EFF/RTR flags incl. RTR-aware analyzer rows + inspector), verified by byte-level parse-back
 - [x] Phase 12 (slice 1) — DBC subset: message/signal parsing + Intel/Motorola decoding + `canlab dbc` CLI (`docs/dbc.md`, `examples/vehicle.dbc`; multiplexing deferred)
-- [x] Portability slice — `canlab package`: validated shareable closures (firmware + dbc/assets, missing firmware is fatal, revalidates from its new home)
+- [x] Portability slice — `canlab package`: validated shareable closures (firmware + dbc/assets; missing firmware fatal for renode nodes, skipped with warning for virtual)
+- [x] Multi-bus headless runs — the virtual timeline routes every node on its own bus (no cross-bus forwarding), matching the live session; `examples/multi_bus.canlab.yaml` proves isolation. Renode runs stay single-bus (one emulator hub)
 - [x] Phase 4 (WS part, slice 2) — job cancellation (flag polled by the emulator thread; graceful shutdown, `cancelled` state, partials discarded; live-verified) + capped per-job UART over WS (`GetRenodeLog`, last-200 bound, GUI Log viewer; live-verified). Still deferred: Renode console/debugger (§50–§51)
 - [ ] Phase 7 — accuracy-first MCP2515 virtual execution + SPI timing
 - [ ] Phase 6+ — analyzer sorting/search, Teensy, faults, FD, DBC

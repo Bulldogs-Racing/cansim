@@ -43,6 +43,12 @@ pub enum BackendError {
     #[error("Renode could not be started.\n\nPossible causes:\n- Renode is not installed\n- configured path is invalid\n- platform configuration failed\n\nLooked in: PATH and {searched}\nFix: unpack a Renode portable build as .tools/renode (see docs/getting-started.md), or set CANLAB_TOOLS=/path/to/tools.\n[View Logs: rerun with RUST_LOG=debug / check the Renode console output above]")]
     NotInstalled { searched: String },
 
+    #[error("Renode is installed but its .NET runtime was not found.\nThe Renode launcher is a script that needs `dotnet` on PATH (Renode 1.17 targets .NET 8, roll-forward to newer majors).\nFix: install the .NET 8+ runtime repo-locally:\n  curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh\n  bash /tmp/dotnet-install.sh --channel 8.0 --runtime dotnet --install-dir ./.tools/dotnet --no-path\n  export PATH=\"$PWD/.tools/dotnet:$PATH\"\nThen rerun `canlab doctor`.")]
+    DotnetMissing,
+
+    #[error("Renode needs a .NET 8+ runtime, but only found: {found}\nFix: install the .NET 8+ runtime (see the DotnetMissing error for the repo-local one-liner) and ensure it precedes older runtimes on PATH.")]
+    DotnetTooOld { found: String },
+
     #[error("node \"{node}\": firmware file not found: {path}\nFix: place the built firmware at a project-relative path (e.g. ./firmware/{node}.elf) — copy/paste or build it with your own toolchain, then rerun.")]
     FirmwareMissing { node: String, path: String },
 

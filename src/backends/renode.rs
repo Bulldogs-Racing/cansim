@@ -40,11 +40,12 @@ pub struct RenodeBackend {
 }
 
 impl RenodeBackend {
-    /// Locate the emulator or explain how to install it (§68).
+    /// Locate the emulator *and* the .NET runtime its launcher needs, or
+    /// explain how to install whichever is missing (§68).
     pub fn discover() -> Result<Self, BackendError> {
-        Ok(RenodeBackend {
-            binary: resolve_binary()?,
-        })
+        let binary = resolve_binary()?;
+        check_dotnet_runtime()?;
+        Ok(RenodeBackend { binary })
     }
 
     /// Check one node up front: supported device + present, ELF firmware.
@@ -152,6 +153,81 @@ fn probe_path(name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Locate a `dotnet` host: `PATH` first, then repo-local roots
+/// (`$CANLAB_TOOLS/dotnet/dotnet`, `./.tools/dotnet/dotnet`). The Renode
+/// launcher script (`/usr/bin/renode`) execs `dotnet` itself, so a missing
+/// runtime used to surface as a cryptic child-process EarlyExit — check it
+/// up front instead.
+fn find_dotnet() -> Option<PathBuf> {
+    if let Some(path) = probe_path("dotnet") {
+        return Some(path);
+    }
+    let mut roots = Vec::new();
+    if let Some(dir) = std::env::var_os("CANLAB_TOOLS") {
+        roots.push(PathBuf::from(dir));
+    }
+    roots.push(PathBuf::from(".tools"));
+    roots
+        .iter()
+        .map(|root| root.join("dotnet").join("dotnet"))
+        .find(|p| p.is_file())
+}
+
+/// Highest `Microsoft.NETCore.App` major version reported by
+/// `dotnet --list-runtimes`, e.g. `Some("8.0.31")`. `None` when the host is
+/// absent, fails, or reports no usable runtime.
+pub fn dotnet_runtime_version() -> Option<String> {
+    let dotnet = find_dotnet()?;
+    let out = Command::new(&dotnet).arg("--list-runtimes").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_runtime_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Parse `--list-runtimes` output for the newest
+/// `Microsoft.NETCore.App <major>.<minor>.<patch>` line. Pure (no process),
+/// so unit tests cover the version policy without a .NET install.
+fn parse_runtime_version(output: &str) -> Option<String> {
+    let mut best: Option<(u64, String)> = None;
+    for line in output.lines() {
+        let Some(rest) = line.strip_prefix("Microsoft.NETCore.App ") else {
+            continue;
+        };
+        let version = rest.split_whitespace().next()?;
+        let major: u64 = version.split('.').next()?.parse().ok()?;
+        if best.as_ref().map(|(m, _)| major > *m).unwrap_or(true) {
+            best = Some((major, version.into()));
+        }
+    }
+    best.map(|(_, v)| v)
+}
+
+/// Renode 1.17 targets `net8.0` with `rollForward: Major`, so any runtime
+/// major >= 8 runs it. Older (or absent) runtimes fail here with a fix,
+/// not mid-run inside the emulator child.
+fn check_dotnet_runtime() -> Result<(), BackendError> {
+    let Some(version) = dotnet_runtime_version() else {
+        return Err(BackendError::DotnetMissing);
+    };
+    if runtime_usable(&version) {
+        Ok(())
+    } else {
+        Err(BackendError::DotnetTooOld { found: version })
+    }
+}
+
+/// Version policy, pure for tests: Renode 1.17 targets `net8.0` with
+/// `rollForward: Major`, so any runtime major >= 8 runs it.
+fn runtime_usable(version: &str) -> bool {
+    version
+        .split('.')
+        .next()
+        .and_then(|m| m.parse::<u64>().ok())
+        .map(|major| major >= 8)
+        .unwrap_or(false)
 }
 
 /// Pure `.resc` generator: one machine per node, all CAN1s on one hub.
@@ -589,5 +665,41 @@ mod tests {
         assert_ne!(a, b);
         std::fs::remove_dir_all(&a).unwrap();
         std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    #[test]
+    fn parses_dotnet_runtimes_and_picks_newest() {
+        let out = concat!(
+            "Microsoft.NETCore.App 6.0.25 [/usr/share/dotnet/shared/Microsoft.NETCore.App]\n",
+            "Microsoft.NETCore.App 8.0.31 [/home/u/.tools/dotnet/shared/Microsoft.NETCore.App]\n",
+            "Microsoft.AspNetCore.App 8.0.31 [/home/u/.tools/dotnet/shared/Microsoft.AspNetCore.App]\n",
+        );
+        assert_eq!(parse_runtime_version(out).as_deref(), Some("8.0.31"));
+        assert_eq!(
+            parse_runtime_version("Microsoft.NETCore.App 9.1.0 [/x]\n").as_deref(),
+            Some("9.1.0")
+        );
+        assert!(parse_runtime_version("").is_none());
+        assert!(parse_runtime_version("garbage\nMicrosoft.AspNetCore.App 8.0.31 [/x]\n").is_none());
+    }
+
+    #[test]
+    fn runtime_policy_matches_renode_net8_rollforward_major() {
+        assert!(runtime_usable("8.0.31"));
+        assert!(runtime_usable("9.0.0"));
+        assert!(!runtime_usable("6.0.25"));
+        assert!(!runtime_usable("garbage"));
+    }
+
+    #[test]
+    fn dotnet_errors_are_actionable() {
+        let missing = BackendError::DotnetMissing;
+        assert!(missing.to_string().contains("dotnet"), "{missing}");
+        assert!(missing.to_string().contains(".tools/dotnet"), "{missing}");
+        let old = BackendError::DotnetTooOld {
+            found: "6.0.25".into(),
+        };
+        assert!(old.to_string().contains("6.0.25"), "{old}");
+        assert!(old.to_string().contains(".NET 8"), "{old}");
     }
 }

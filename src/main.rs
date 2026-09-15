@@ -670,6 +670,19 @@ fn cmd_doctor() -> i32 {
             ok = false;
         }
     }
+    // The Renode launcher is a script that execs `dotnet` itself: a present
+    // but unrunnable Renode (no runtime) used to fail mid-run. discover()
+    // now fails fast on this; doctor reports it the same way.
+    match cansimcan::backends::renode::dotnet_runtime_version() {
+        Some(v) => println!("✓ dotnet runtime {v} (needed by the Renode launcher)"),
+        None => {
+            println!(
+                "✗ dotnet runtime not found on PATH or .tools/dotnet (Renode runs fail without it)"
+            );
+            println!("  Fix: install the .NET 8+ runtime repo-locally — one-liner in docs/getting-started.md");
+            ok = false;
+        }
+    }
     if !report_tool(
         "arm-none-eabi-gcc",
         probe_binary("arm-none-eabi-gcc"),

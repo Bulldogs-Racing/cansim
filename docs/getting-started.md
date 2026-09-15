@@ -16,11 +16,24 @@ nothing is installed system-wide:
 ```text
 .tools/
 ├── renode -> <your Renode portable install>   # emulation backend (Phase 4)
+├── dotnet/                                    # .NET 8+ runtime for the Renode launcher
 └── arm-gcc -> arm-gnu-toolchain-*/            # STM32 firmware builds
 ```
 
 - **Renode**: unpack a `linux-*-portable` build and link it as
   `.tools/renode` (the portable build embeds the dotnet runtime).
+  A system `renode` package works too — but its launcher still needs a
+  .NET 8+ runtime (see next line).
+- **dotnet runtime** (only if your `renode` needs it — `renode --version`
+  says so): install repo-locally, no root needed:
+  ```bash
+  curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
+  bash /tmp/dotnet-install.sh --channel 8.0 --runtime dotnet --install-dir ./.tools/dotnet --no-path
+  export PATH="$PWD/.tools/dotnet:$PATH"
+  ```
+  `canlab doctor` reports the runtime version; `RenodeBackend::discover`
+  fails fast with install instructions when it is missing (instead of a
+  cryptic mid-run emulator exit).
 - **ARM toolchain**: unpack an `aarch64`-hosted `arm-none-eabi` tarball
   from ARM's GNU toolchain downloads and link it as `.tools/arm-gcc`
   (14.2.rel1 verified: `arm-none-eabi-gcc -mcpu=cortex-m3` emits ARM ELF32).

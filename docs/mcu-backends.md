@@ -33,6 +33,19 @@ CLI output and `--export-json` share the virtual-run format. Mixed
 virtual+renode projects are rejected with an explicit error (no silent
 cross-backend time sync).
 
+Verified live: two-node STM32F103 TX→RX exchange passes
+(`cargo test --test renode_backend -- --ignored`), most recently against
+Renode v1.17.0 + .NET 8.0.31 + ARM GCC 14.2.rel1, all repo-local except a
+system `renode` package.
+
+### Runtime prerequisite: dotnet
+
+The Renode launcher execs `dotnet` itself, so Renode needs a .NET 8+
+runtime even when the emulator binary is installed. `RenodeBackend::discover`
+checks this up front (`DotnetMissing` / `DotnetTooOld` with install
+instructions) and `canlab doctor` probes it — a present-but-unrunnable
+Renode fails fast instead of dying mid-run inside the emulator child.
+
 ```bash
 canlab simulate project.canlab [--run-secs 30] [--export-json events.json]
 ```

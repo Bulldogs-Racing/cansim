@@ -31,6 +31,9 @@ export type ClientMsg =
   | { type: "AddMessage"; message: MessageDecl }
   | { type: "UpdateMessage"; index: number; message: MessageDecl }
   | { type: "RemoveMessage"; index: number }
+  | { type: "AddFault"; fault: FaultDecl }
+  | { type: "UpdateFault"; index: number; fault: FaultDecl }
+  | { type: "RemoveFault"; index: number }
   | { type: "StartRenodeRun"; path: string; runSecs?: number }
   | { type: "GetRenodeJob"; jobId: number }
   | { type: "CancelRenodeJob"; jobId: number }
@@ -111,6 +114,7 @@ export interface ProjectDoc {
   buses: ProjectBus[];
   nodes: ProjectNode[];
   messages: MessageDecl[];
+  faults: FaultDecl[];
 }
 
 /** One scripted frame (mirror of MessageDecl in src/project/schema.rs). */
@@ -119,6 +123,16 @@ export interface MessageDecl {
   id: number;
   data: number[];
   extended?: boolean;
+}
+
+/** One fault policy (mirror of FaultDecl in src/project/schema.rs). */
+export interface FaultDecl {
+  fault: WireFault;
+  node?: string | null;
+  id?: number | null;
+  extended?: boolean;
+  probability: number;
+  seed: number;
 }
 
 /** Full node declaration as accepted by AddNode/UpdateNode. */

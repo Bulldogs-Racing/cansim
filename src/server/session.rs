@@ -15,7 +15,7 @@ use crate::can::errors::CanErrorKind;
 use crate::can::frame::CanFrame;
 use crate::can::id::CanId;
 use crate::can::timing::SimNanos;
-use crate::project::schema::{BusDecl, MessageDecl, NodeDecl};
+use crate::project::schema::{BusDecl, FaultDecl, MessageDecl, NodeDecl};
 use crate::project::validation::KNOWN_BACKENDS;
 use crate::project::validation::KNOWN_DEVICES;
 use crate::project::{validate_project, Project};
@@ -78,6 +78,20 @@ pub enum SessionError {
     },
     #[error("message payload too long ({len} > 8 bytes)")]
     MessagePayloadTooLong { len: usize },
+    #[error("cannot remove node \"{node}\" — still referenced by {count} fault polic(ies); delete them first")]
+    NodeHasFaults { node: String, count: usize },
+    #[error("unknown fault index {index} (project has {count} fault polic(ies))")]
+    UnknownFault { index: usize, count: usize },
+    #[error("fault node \"{node}\" is not a loaded node (nodes: {nodes})")]
+    FaultUnknownNode { node: String, nodes: String },
+    #[error("fault id {id:#X} out of range (max {max:#X} for {kind} ids)")]
+    FaultIdOutOfRange {
+        id: u32,
+        max: u32,
+        kind: &'static str,
+    },
+    #[error("fault probability {probability} out of range (expected 0.0..=1.0)")]
+    FaultBadProbability { probability: f64 },
 }
 
 impl From<EngineError> for SessionError {
@@ -320,6 +334,17 @@ impl Session {
                     count: refs,
                 });
             }
+            let faults = proj
+                .faults
+                .iter()
+                .filter(|f| f.node.as_deref() == Some(id))
+                .count();
+            if faults > 0 {
+                return Err(SessionError::NodeHasFaults {
+                    node: id.into(),
+                    count: faults,
+                });
+            }
             proj.nodes.retain(|n| n.id != id);
             Ok(())
         })
@@ -356,6 +381,41 @@ impl Session {
                 });
             }
             ctx.project.messages.remove(index);
+            Ok(())
+        })
+    }
+
+    pub fn add_fault(&mut self, fault: FaultDecl) -> Result<(), SessionError> {
+        self.apply_edit(|ctx| {
+            check_fault_decl(ctx.project, &fault)?;
+            ctx.project.faults.push(fault.clone());
+            Ok(())
+        })
+    }
+
+    pub fn update_fault(&mut self, index: usize, fault: FaultDecl) -> Result<(), SessionError> {
+        self.apply_edit(|ctx| {
+            check_fault_decl(ctx.project, &fault)?;
+            let count = ctx.project.faults.len();
+            let slot = ctx
+                .project
+                .faults
+                .get_mut(index)
+                .ok_or(SessionError::UnknownFault { index, count })?;
+            *slot = fault.clone();
+            Ok(())
+        })
+    }
+
+    pub fn remove_fault(&mut self, index: usize) -> Result<(), SessionError> {
+        self.apply_edit(|ctx| {
+            if index >= ctx.project.faults.len() {
+                return Err(SessionError::UnknownFault {
+                    index,
+                    count: ctx.project.faults.len(),
+                });
+            }
+            ctx.project.faults.remove(index);
             Ok(())
         })
     }
@@ -740,6 +800,37 @@ fn check_message_decl(proj: &Project, msg: &MessageDecl) -> Result<(), SessionEr
     Ok(())
 }
 
+/// Fault-policy checks shared by add/update: node must exist when scoped,
+/// id within standard/extended range, probability in [0.0, 1.0]. Mirrors
+/// the `faults:` rules in `validate_project` so edits fail fast with the
+/// same wording a later save would report.
+fn check_fault_decl(proj: &Project, fault: &FaultDecl) -> Result<(), SessionError> {
+    if let Some(node) = &fault.node {
+        if !proj.nodes.iter().any(|n| &n.id == node) {
+            return Err(SessionError::FaultUnknownNode {
+                node: node.clone(),
+                nodes: known_nodes_list(proj),
+            });
+        }
+    }
+    if let Some(id) = fault.id {
+        let (max, kind) = if fault.extended {
+            (0x1FFF_FFFF, "extended")
+        } else {
+            (0x7FF, "standard")
+        };
+        if id > max {
+            return Err(SessionError::FaultIdOutOfRange { id, max, kind });
+        }
+    }
+    if !(0.0..=1.0).contains(&fault.probability) {
+        return Err(SessionError::FaultBadProbability {
+            probability: fault.probability,
+        });
+    }
+    Ok(())
+}
+
 fn bus_list(proj: &Project) -> String {
     proj.buses
         .iter()
@@ -1071,6 +1162,93 @@ messages:
             data: data.to_vec(),
             extended: false,
         }
+    }
+
+    fn fault(node: Option<&str>, probability: f64) -> FaultDecl {
+        FaultDecl {
+            fault: crate::can::bus::WireFault::DropFrame,
+            node: node.map(|s| s.into()),
+            id: None,
+            extended: false,
+            probability,
+            seed: 3,
+        }
+    }
+
+    #[test]
+    fn fault_crud_validates_and_guards_nodes() {
+        use crate::can::bus::WireFault;
+        let mut s = Session::new();
+        assert!(matches!(
+            s.add_fault(fault(None, 0.5)),
+            Err(SessionError::NoProject)
+        ));
+        s.new_project();
+        s.add_bus("b", 500_000).unwrap();
+        s.add_node(node("n", "stm32f103", "b")).unwrap();
+
+        s.add_fault(fault(Some("n"), 0.5)).unwrap();
+        assert_eq!(s.project().unwrap().faults.len(), 1);
+        assert!(s.dirty());
+
+        // Unknown node, bad probability, bad id — same wording save reports.
+        assert!(matches!(
+            s.add_fault(fault(Some("ghost"), 0.5)),
+            Err(SessionError::FaultUnknownNode { .. })
+        ));
+        assert!(matches!(
+            s.add_fault(fault(None, 1.5)),
+            Err(SessionError::FaultBadProbability { .. })
+        ));
+        assert!(matches!(
+            s.add_fault(FaultDecl {
+                id: Some(0x800),
+                ..fault(None, 0.5)
+            }),
+            Err(SessionError::FaultIdOutOfRange { .. })
+        ));
+        // Extended ids get the 29-bit ceiling.
+        s.add_fault(FaultDecl {
+            id: Some(0x1FFF_FFFF),
+            extended: true,
+            ..fault(None, 0.5)
+        })
+        .unwrap();
+        assert_eq!(s.project().unwrap().faults.len(), 2);
+
+        // FlipBit travels through the CRUD path untouched.
+        s.update_fault(
+            0,
+            FaultDecl {
+                fault: WireFault::FlipBit(30),
+                ..fault(Some("n"), 1.0)
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            s.project().unwrap().faults[0].fault,
+            WireFault::FlipBit(30)
+        ));
+        assert!(matches!(
+            s.update_fault(7, fault(None, 0.5)),
+            Err(SessionError::UnknownFault { .. })
+        ));
+
+        // Node removal is refused while a policy names it — like messages.
+        match s.remove_node("n") {
+            Err(SessionError::NodeHasFaults { node, count }) => {
+                assert_eq!(node, "n");
+                assert_eq!(count, 1);
+            }
+            other => panic!("expected NodeHasFaults, got {other:?}"),
+        }
+        s.remove_fault(0).unwrap();
+        s.remove_fault(0).unwrap();
+        assert!(matches!(
+            s.remove_fault(0),
+            Err(SessionError::UnknownFault { .. })
+        ));
+        s.remove_node("n").unwrap();
     }
 
     #[test]

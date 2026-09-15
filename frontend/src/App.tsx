@@ -15,6 +15,7 @@ import {
   CanLabApi,
   ClientMsg,
   EngineState,
+  FaultDecl,
   fmtTimeNs,
   KNOWN_DEVICES,
   matchIdFilter,
@@ -75,6 +76,7 @@ export default function App(): JSX.Element {
   const [buses, setBuses] = useState<ProjectBus[]>([]);
   const [nodes, setNodes] = useState<ProjectNode[]>([]);
   const [messages, setMessages] = useState<MessageDecl[]>([]);
+  const [faults, setFaults] = useState<FaultDecl[]>([]);
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
   const [flowEdges, setFlowEdges] = useState<Edge[]>([]);
   const [canvasSel, setCanvasSel] = useState<string | null>(null);
@@ -125,6 +127,7 @@ export default function App(): JSX.Element {
       setBuses([]);
       setNodes([]);
       setMessages([]);
+      setFaults([]);
       setFlowNodes([]);
       setFlowEdges([]);
       setCanvasSel(null);
@@ -136,6 +139,7 @@ export default function App(): JSX.Element {
     setBuses(pb);
     setNodes(pn);
     setMessages(p.messages ?? []);
+    setFaults(p.faults ?? []);
     const pos = positionsRef.current;
     setFlowNodes([
       ...pb.map((b, i) => ({
@@ -612,6 +616,16 @@ export default function App(): JSX.Element {
         />
       )}
 
+      {connected && flowNodes.length > 0 && (
+        <FaultsPanel
+          key={`faultpolicies:${nodes.map((n) => n.id).join(",")}`}
+          faults={faults}
+          nodes={nodes}
+          onAdd={(fault) => editCmd("AddFault", { type: "AddFault", fault })}
+          onRemove={(index) => editCmd("RemoveFault", { type: "RemoveFault", index })}
+        />
+      )}
+
       {connected && (
         <section aria-label="renode runs" style={{ background: "#0b1220", borderRadius: 12, border: "1px solid #1f2937", padding: 12, marginBottom: 12 }}>
           <h2 style={{ margin: "0 0 8px", fontSize: 16 }}>Renode firmware runs ({jobs.length})</h2>
@@ -953,6 +967,130 @@ function FaultPanel({ nodes, onFault }: {
           <input aria-label="wire bit offset" title="0-based SOF..EOF bit index (server validates against the wire length)" style={{ ...field, width: 90 }} value={offsetText} onChange={(e) => setOffsetText(e.target.value)} />
         )}
         <button style={btn} onClick={submit}>⚡ Inject fault</button>
+      </div>
+      {formError && <p role="alert" style={{ color: "#fca5a5", margin: "8px 0 0" }}>{formError}</p>}
+    </section>
+  );
+}
+
+/** One-line fault description for policy tables. */
+function faultLabel(fault: WireFault): string {
+  if (typeof fault === "string") return fault;
+  return `FlipBit @${fault.FlipBit}`;
+}
+
+/** Project fault-policy editor: what the engine draws against on every
+ *  Run, in order (first match wins). Add form validates ranges inline;
+ *  server-side validation mirrors validate_project as the backstop.
+ *  Removing a node still named here is refused until its rows go. */
+function FaultPoliciesPanel({ faults, nodes, onAdd, onRemove }: {
+  faults: FaultDecl[];
+  nodes: ProjectNode[];
+  onAdd: (fault: FaultDecl) => void;
+  onRemove: (index: number) => void;
+}): JSX.Element {
+  const [nodeSel, setNodeSel] = useState("");
+  const [faultKind, setFaultKind] = useState<"drop" | "crc" | "flip">("drop");
+  const [offsetText, setOffsetText] = useState("0");
+  const [idText, setIdText] = useState("");
+  const [extended, setExtended] = useState(false);
+  const [probText, setProbText] = useState("0.5");
+  const [seedText, setSeedText] = useState("1");
+  const [formError, setFormError] = useState<string | null>(null);
+  const field: React.CSSProperties = { padding: 6, borderRadius: 6, border: "1px solid #374151", background: "#111827", color: "#e5e7eb" };
+  const btn: React.CSSProperties = { padding: "6px 12px", borderRadius: 6, border: "1px solid #374151", background: "#1f2937", color: "#e5e7eb", cursor: "pointer" };
+
+  const submit = () => {
+    setFormError(null);
+    let fault: WireFault;
+    if (faultKind === "flip") {
+      const offset = Number(offsetText);
+      if (!Number.isInteger(offset) || offset < 0) {
+        setFormError(`"${offsetText}" is not a wire bit offset (integer >= 0)`);
+        return;
+      }
+      fault = { FlipBit: offset };
+    } else if (faultKind === "crc") {
+      fault = "CorruptCrc";
+    } else {
+      fault = "DropFrame";
+    }
+    let id: number | null = null;
+    if (idText.trim() !== "") {
+      const parsed = Number(idText.trim().toLowerCase().startsWith("0x") ? idText.trim() : `0x${idText.trim()}`);
+      if (!Number.isInteger(parsed) || parsed < 0) {
+        setFormError(`"${idText}" is not a hex frame id (e.g. 0x123, empty = all ids)`);
+        return;
+      }
+      const max = extended ? 0x1fffffff : 0x7ff;
+      if (parsed > max) {
+        setFormError(`0x${parsed.toString(16).toUpperCase()} exceeds the ${extended ? "29-bit extended" : "11-bit standard"} range`);
+        return;
+      }
+      id = parsed;
+    }
+    const probability = Number(probText);
+    if (!Number.isFinite(probability) || probability < 0 || probability > 1) {
+      setFormError(`"${probText}" is not a probability (0.0–1.0)`);
+      return;
+    }
+    const seed = Number(seedText);
+    if (!Number.isInteger(seed) || seed < 0 || seed > Number.MAX_SAFE_INTEGER) {
+      setFormError(`"${seedText}" is not a seed (integer 0–2^53-1)`);
+      return;
+    }
+    onAdd({ fault, node: nodeSel === "" ? null : nodeSel, id, extended, probability, seed });
+  };
+
+  return (
+    <section aria-label="fault policies" style={{ background: "#0b1220", borderRadius: 12, border: "1px solid #1f2937", padding: 12, marginBottom: 12 }}>
+      <h2 style={{ margin: "0 0 8px", fontSize: 16 }}>Fault policies ({faults.length})</h2>
+      <p style={{ margin: "0 0 8px", color: "#9ca3af", fontSize: 13 }}>
+        Seeded policies every Run draws against, in order (first match wins). Same project, same log.
+        Deleting a row shifts later indices; a node named here cannot be removed first.
+      </p>
+      {faults.length > 0 && (
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, marginBottom: 8 }}>
+          <thead>
+            <tr style={{ textAlign: "left", color: "#9ca3af" }}>
+              <th>#</th><th>Fault</th><th>Node</th><th>ID</th><th>P</th><th>Seed</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {faults.map((f, i) => (
+              <tr key={i}>
+                <td>{i}</td>
+                <td style={{ fontFamily: "monospace" }}>{faultLabel(f.fault)}</td>
+                <td>{f.node ?? "(all)"}</td>
+                <td style={{ fontFamily: "monospace" }}>{f.id === null || f.id === undefined ? "(all)" : `0x${f.id.toString(16).toUpperCase()}${f.extended ? " (ext)" : ""}`}</td>
+                <td>{f.probability}</td>
+                <td style={{ fontFamily: "monospace" }}>{f.seed}</td>
+                <td><button style={btn} onClick={() => onRemove(i)}>Delete</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <select aria-label="fault kind" style={field} value={faultKind} onChange={(e) => setFaultKind(e.target.value as "drop" | "crc" | "flip")}>
+          <option value="drop">Drop frame</option>
+          <option value="crc">Corrupt CRC</option>
+          <option value="flip">Flip wire bit</option>
+        </select>
+        {faultKind === "flip" && (
+          <input aria-label="wire bit offset" title="0-based SOF..EOF bit index" style={{ ...field, width: 90 }} value={offsetText} onChange={(e) => setOffsetText(e.target.value)} />
+        )}
+        <select aria-label="policy node" title="empty = all nodes" style={field} value={nodeSel} onChange={(e) => setNodeSel(e.target.value)}>
+          <option value="">(all nodes)</option>
+          {nodes.map((n) => <option key={n.id} value={n.id}>{n.id}</option>)}
+        </select>
+        <input aria-label="policy id in hex" title="hex frame id, e.g. 0x123 (empty = all ids)" placeholder="id (all)" style={{ ...field, width: 110 }} value={idText} onChange={(e) => setIdText(e.target.value)} />
+        <label style={{ fontSize: 13 }}>
+          <input type="checkbox" checked={extended} onChange={(e) => setExtended(e.target.checked)} /> extended
+        </label>
+        <input aria-label="probability" title="per-transmission probability 0.0–1.0" style={{ ...field, width: 70 }} value={probText} onChange={(e) => setProbText(e.target.value)} />
+        <input aria-label="seed" title="draw-stream seed (integer)" style={{ ...field, width: 110 }} value={seedText} onChange={(e) => setSeedText(e.target.value)} />
+        <button style={btn} onClick={submit}>＋ Add policy</button>
       </div>
       {formError && <p role="alert" style={{ color: "#fca5a5", margin: "8px 0 0" }}>{formError}</p>}
     </section>

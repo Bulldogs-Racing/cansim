@@ -11,7 +11,7 @@
 
 use crate::can::bus::WireFault;
 use crate::can::errors::CanErrorKind;
-use crate::project::{MessageDecl, NodeDecl, Project};
+use crate::project::{FaultDecl, MessageDecl, NodeDecl, Project};
 use crate::simulation::engine::EngineState;
 use crate::simulation::event::{SimEvent, SimEventKind};
 use serde::{Deserialize, Serialize};
@@ -120,6 +120,21 @@ pub enum ClientMsg {
     },
     /// Delete the scripted frame at `index`.
     RemoveMessage {
+        index: usize,
+    },
+    /// Append one fault policy to `faults:` (node/id narrow eligibility;
+    /// probability in [0.0, 1.0]; seed fixes the draw stream).
+    AddFault {
+        fault: FaultDecl,
+    },
+    /// Replace the fault policy at `index` (shifts after deletes — see
+    /// bugs.md; refresh the list after every op).
+    UpdateFault {
+        index: usize,
+        fault: FaultDecl,
+    },
+    /// Delete the fault policy at `index`.
+    RemoveFault {
         index: usize,
     },
     /// Start a supervised Renode firmware run in the background (job
@@ -366,6 +381,35 @@ mod tests {
             r#"{"type":"RemoveMessage","index":0}"#,
         ] {
             assert!(parse_client_msg(raw).is_ok());
+        }
+    }
+
+    #[test]
+    fn fault_ops_round_trip() {
+        use crate::can::bus::WireFault;
+        let add = ClientMsg::AddFault {
+            fault: FaultDecl {
+                fault: WireFault::CorruptCrc,
+                node: Some("n".into()),
+                id: None,
+                extended: false,
+                probability: 0.25,
+                seed: 11,
+            },
+        };
+        let json = serde_json::to_value(&add).unwrap();
+        assert_eq!(json["type"], "AddFault");
+        assert_eq!(json["fault"]["node"], "n");
+        assert_eq!(json["fault"]["probability"], 0.25);
+        let back: ClientMsg = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, ClientMsg::AddFault { .. }));
+        for raw in [
+            r#"{"type":"AddFault","fault":{"fault":"DropFrame","probability":1.0,"seed":5}}"#,
+            r#"{"type":"AddFault","fault":{"fault":{"FlipBit":30},"probability":0.5,"seed":5}}"#,
+            r#"{"type":"UpdateFault","index":1,"fault":{"fault":"DropFrame","probability":0.0,"seed":0}}"#,
+            r#"{"type":"RemoveFault","index":0}"#,
+        ] {
+            assert!(parse_client_msg(raw).is_ok(), "{raw}");
         }
     }
 

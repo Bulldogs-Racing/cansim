@@ -271,6 +271,19 @@ fn dispatch(state: &Arc<Mutex<ServerState>>, text: &str) -> ServerMsg {
                 .remove_message(index)
                 .map(|()| status_of(&s.session)),
         ),
+        ClientMsg::AddFault { fault } => {
+            ok_or_error(s.session.add_fault(fault).map(|()| status_of(&s.session)))
+        }
+        ClientMsg::UpdateFault { index, fault } => ok_or_error(
+            s.session
+                .update_fault(index, fault)
+                .map(|()| status_of(&s.session)),
+        ),
+        ClientMsg::RemoveFault { index } => ok_or_error(
+            s.session
+                .remove_fault(index)
+                .map(|()| status_of(&s.session)),
+        ),
         ClientMsg::GetStatus => status_of(&s.session),
         ClientMsg::GetProject => match s.session.project() {
             Some(p) => ServerMsg::Project { project: p.clone() },

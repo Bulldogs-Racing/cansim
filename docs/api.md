@@ -42,6 +42,9 @@ canlab serve --port 21011 [--project <file>]
 | `AddMessage { message }` | `Status` | Appends a scripted frame (sender must exist; id range + DLC enforced). |
 | `UpdateMessage { index, message }` | `Status` | Replaces the frame at `index`. |
 | `RemoveMessage { index }` | `Status` | Deletes the frame at `index` (later rows shift — see `bugs.md`). |
+| `AddFault { fault }` | `Status` | Appends a fault policy (node/id narrow eligibility; probability 0–1; seed fixes the stream). |
+| `UpdateFault { index, fault }` | `Status` | Replaces the policy at `index`. |
+| `RemoveFault { index }` | `Status` | Deletes the policy at `index` (later rows shift — see `bugs.md`). |
 | `StartRenodeRun { path, runSecs? }` | `RenodeJobStarted { jobId }` | Validates an all-`renode` project file and starts a supervised firmware run on a background thread (prompt reply, never blocks). `runSecs` defaults to 30. Refused when the `--max-jobs` running budget is exhausted. |
 | `GetRenodeJob { jobId }` | `RenodeJob { job }` | One job: `state` (`running`/`done`/`failed`/`cancelled`), TX/RX counts, `error`. |
 | `CancelRenodeJob { jobId }` | `RenodeJob { job }` | Trips the job's cancel flag (async shutdown on the emulator thread's next tick). Already-finished jobs are an `Error`. |

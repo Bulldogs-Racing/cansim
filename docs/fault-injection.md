@@ -71,6 +71,10 @@ Semantics:
   (validated like `messages:`); `GetProject` returns them and every Run
   honors them, GUI included.
 
+Policies are editable over WS (`AddFault`/`UpdateFault`/`RemoveFault`,
+index-addressed like messages — see `bugs.md`) and in the GUI *Fault
+policies* panel; a node named by a policy cannot be removed first.
+
 ## Deferred (explicit)
 
 - Bus-line faults (disconnect CANH/CANL, force dominant/recessive),

@@ -324,6 +324,80 @@ fn ws_inject_fault_reports_wire_truth() {
 }
 
 #[test]
+fn ws_fault_crud_applies() {
+    let dir = std::env::temp_dir().join(format!("canlab-ws-faults-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let proj = dir.join("p.canlab");
+    std::fs::write(&proj, PROJECT).unwrap();
+
+    let port = serve_ephemeral(Arc::new(Mutex::new(ServerState::new(1))));
+    let (mut ws, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}")).unwrap();
+    let req = serde_json::json!({"type": "Load", "path": proj.display().to_string()}).to_string();
+    assert_eq!(rpc(&mut ws, &req)["type"], "Status");
+
+    // Certain drop on the sender: runs transmit, nothing delivers.
+    let added = rpc(
+        &mut ws,
+        r#"{"type":"AddFault","fault":{"fault":"DropFrame","node":"engine_ecu","probability":1.0,"seed":5}}"#,
+    );
+    assert_eq!(added["type"], "Status");
+    assert_eq!(added["dirty"], true);
+    let summary = rpc(&mut ws, r#"{"type":"Start"}"#);
+    assert_eq!(summary["transmitted"], 1);
+    assert_eq!(summary["received"], 0);
+
+    // Bad policies fail fast with the save-time wording.
+    for raw in [
+        r#"{"type":"AddFault","fault":{"fault":"DropFrame","node":"ghost","probability":0.5,"seed":1}}"#,
+        r#"{"type":"AddFault","fault":{"fault":"DropFrame","probability":2.0,"seed":1}}"#,
+        r#"{"type":"AddFault","fault":{"fault":"DropFrame","id":2048,"probability":0.5,"seed":1}}"#,
+    ] {
+        assert_eq!(rpc(&mut ws, raw)["type"], "Error", "{raw}");
+    }
+    // Update (keeping node scope) + out-of-range index.
+    let updated = rpc(
+        &mut ws,
+        r#"{"type":"UpdateFault","index":0,"fault":{"fault":"CorruptCrc","node":"engine_ecu","probability":0.0,"seed":6}}"#,
+    );
+    assert_eq!(updated["type"], "Status");
+    assert_eq!(
+        rpc(
+            &mut ws,
+            r#"{"type":"UpdateFault","index":3,"fault":{"fault":"DropFrame","probability":0.0,"seed":0}}"#
+        )["type"],
+        "Error"
+    );
+    // A 0.0 rule never fires: delivery restored.
+    let summary = rpc(&mut ws, r#"{"type":"Start"}"#);
+    assert_eq!(summary["received"], 1);
+
+    // Node removal: messages refuse first; once they clear, faults refuse.
+    assert_eq!(
+        rpc(&mut ws, r#"{"type":"RemoveNode","id":"engine_ecu"}"#)["type"],
+        "Error"
+    );
+    assert_eq!(
+        rpc(&mut ws, r#"{"type":"RemoveMessage","index":0}"#)["type"],
+        "Status"
+    );
+    let err = rpc(&mut ws, r#"{"type":"RemoveNode","id":"engine_ecu"}"#);
+    assert_eq!(err["type"], "Error");
+    assert!(err["message"].as_str().unwrap().contains("fault"));
+    assert_eq!(
+        rpc(&mut ws, r#"{"type":"RemoveFault","index":0}"#)["type"],
+        "Status"
+    );
+    let proj = rpc(&mut ws, r#"{"type":"GetProject"}"#);
+    assert_eq!(proj["project"]["faults"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        rpc(&mut ws, r#"{"type":"RemoveNode","id":"engine_ecu"}"#)["type"],
+        "Status"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn ws_renode_jobs_reject_bad_input_without_emulator() {
     let dir = std::env::temp_dir().join(format!("canlab-ws-renode-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

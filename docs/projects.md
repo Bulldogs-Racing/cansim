@@ -54,3 +54,10 @@ Project files are untrusted input. Validation enforces:
 Share a project as a directory (`project.canlab` + relative
 `firmware/` + `dbc/` + `assets/`). Never embed huge binaries in the
 project file — reference them by relative path.
+
+`canlab package project.canlab --out pkg/` builds that directory for
+you: it validates, then copies the project file, every referenced
+firmware file (missing firmware is a hard error here — packages must be
+complete), and the `dbc/`/`assets/` companions when present, preserving
+relative layout so the packaged project validates and simulates from
+its new home. The output directory must not exist yet.

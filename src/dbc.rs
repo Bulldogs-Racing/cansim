@@ -222,7 +222,11 @@ fn extract_raw(payload: &[u8; 8], sig: &DbcSignal) -> f64 {
         for _ in 0..sig.len {
             let bit = (payload[(pos / 8) as usize] >> (pos % 8)) & 1;
             raw = (raw << 1) | bit as u64;
-            pos = if pos % 8 == 0 { pos + 15 } else { pos - 1 };
+            pos = if pos.is_multiple_of(8) {
+                pos + 15
+            } else {
+                pos - 1
+            };
         }
     }
     if sig.signed {
@@ -249,7 +253,7 @@ fn parse_message(
     let (id_part, after_id) = rest.split_once(char::is_whitespace).ok_or_else(bad)?;
     let id: u32 = id_part.parse().map_err(|_| bad())?;
     let (name_part, after_name) = after_id.trim_start().split_once(':').ok_or_else(bad)?;
-    let mut tail = after_name.trim().split_whitespace();
+    let mut tail = after_name.split_whitespace();
     let dlc: u8 = tail.next().ok_or_else(bad)?.parse().map_err(|_| bad())?;
     let transmitter = tail.next().ok_or_else(bad)?.to_string();
     Ok(DbcMessage {
@@ -275,7 +279,7 @@ fn parse_signal(rest: &str, origin: &str, line: usize, text: &str) -> Result<Dbc
     if name.is_empty() {
         return Err(bad());
     }
-    let mut tail = after_name.trim().split_whitespace();
+    let mut tail = after_name.split_whitespace();
     // `<start>|<len>@<endian><sign>`
     let layout = tail.next().ok_or_else(bad)?;
     let (bits, endian_sign) = layout.split_once('@').ok_or_else(bad)?;

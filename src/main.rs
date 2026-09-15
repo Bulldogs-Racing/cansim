@@ -38,6 +38,14 @@ enum Commands {
         /// Project directory to create.
         name: PathBuf,
     },
+    /// Package a project directory for sharing (project file + firmware).
+    Package {
+        /// Project file to package.
+        project: PathBuf,
+        /// Output directory (must not exist).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Run a headless deterministic simulation (no GUI required).
     Simulate {
         /// Project file (YAML, e.g. project.canlab).
@@ -96,6 +104,7 @@ fn main() {
     let cli = Cli::parse();
     let code = match cli.command {
         Commands::New { name } => cmd_new(&name),
+        Commands::Package { project, out } => cmd_package(&project, out.as_deref()),
         Commands::Simulate {
             project,
             export_json,
@@ -204,6 +213,39 @@ fn load_and_validate(path: &Path) -> Option<Project> {
         return None;
     }
     Some(proj)
+}
+
+/// Package a project for sharing: validate, then copy the project file +
+/// every referenced firmware file (+ `dbc/`/`assets/` when present) into
+/// a fresh output directory, preserving relative layout.
+fn cmd_package(project: &Path, out: Option<&Path>) -> i32 {
+    use cansimcan::package::package_project;
+    let out_dir: PathBuf = match out {
+        Some(o) => o.into(),
+        None => {
+            let stem = project
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "project".into());
+            project
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(format!("{stem}-pkg"))
+        }
+    };
+    match package_project(project, &out_dir) {
+        Ok(rep) => {
+            println!("Packaged {} -> {}", project.display(), out_dir.display());
+            for f in &rep.files {
+                println!("  {f}");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
 }
 
 fn fmt_time(t_ns: u64) -> String {

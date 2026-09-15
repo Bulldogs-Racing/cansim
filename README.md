@@ -31,6 +31,7 @@ More: `docs/getting-started.md`, `docs/architecture.md`, `docs/can-model.md`.
 
 ```bash
 canlab new my-project                  # scaffold portable project dir
+canlab package project.canlab --out pkg/  # copy the shareable closure (firmware + dbc/assets)
 canlab simulate project.canlab         # headless run (virtual or Renode)
 canlab simulate renode.canlab --run-secs 30 --export-json events.json
 canlab replay project.canlab events.json  # deterministically replay a recorded trace

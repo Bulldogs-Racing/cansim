@@ -21,6 +21,8 @@ use super::api::{
 };
 use crate::project::Project;
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -386,6 +388,21 @@ fn child_path(dotnet: &Path, current: Option<&std::ffi::OsStr>) -> Option<std::f
     std::env::join_paths(paths).ok()
 }
 
+// Raw process-group primitives. Declared here (instead of the `libc`
+// crate) so the emulator backend adds no dependency: both calls link
+// against the system libc already present, and the backend only runs on
+// Unix in practice (Renode ships Linux/macOS builds; Windows falls back
+// to plain child kill — see `shutdown`).
+#[cfg(unix)]
+extern "C" {
+    fn setsid() -> i32;
+    fn killpg(pgrp: i32, sig: i32) -> i32;
+}
+
+/// SIGKILL number (signal.h). Passed to [`killpg`] via the raw FFI above.
+#[cfg(unix)]
+const SIGKILL_RAW: i32 = 9;
+
 /// Unique scratch dir per run (no hard-coded temp paths, §18).
 fn create_workdir() -> std::io::Result<PathBuf> {
     let dir = std::env::temp_dir().join(format!(
@@ -435,6 +452,25 @@ fn run_supervised(
         cmd.arg("-e").arg(e);
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // New session + process group for the emulator subtree: launcher
+    // scripts fork grandchildren (bash `renode` -> `dotnet Renode.dll`)
+    // that inherit the pipes, so killing only the direct child orphans
+    // them and hangs the pipe drainers forever (user-hit hang on
+    // cancel-during-boot). The group dies as one on killpg.
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            // SAFETY: setsid(2) is async-signal-safe, which is all
+            // pre_exec (post-fork, pre-exec) context permits. The child
+            // is never a group leader here (fresh pid), so this succeeds;
+            // failure aborts the spawn loudly via SpawnFailed.
+            if setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
     // The Renode launcher execs `dotnet` itself: give the child the
     // resolved host's directory first on PATH, so repo-local runtimes work
     // without the user exporting anything.
@@ -500,9 +536,7 @@ fn run_supervised(
             Some(status) => {
                 // Natural exit: reap, join drainers, collect output.
                 let _ = child.wait();
-                for t in threads {
-                    let _ = t.join();
-                }
+                join_bounded(threads, Duration::from_secs(5));
                 return finish(status, &stdout_buf, &stderr_buf);
             }
             None => {
@@ -543,6 +577,10 @@ fn finish(
 /// Budget elapsed: graceful `quit` via the telnet monitor if we learned its
 /// port, brief grace period, then kill. The child is always reaped — no
 /// orphaned emulator processes (§19).
+///
+/// Kill semantics: the emulator runs in its own process group (see spawn),
+/// so `killpg` takes launcher grandchildren with it. Pipe drainers are
+/// joined with a bound — a surviving writer can delay but never hang us.
 fn shutdown(
     child: &mut Child,
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -559,9 +597,7 @@ fn shutdown(
                 {
                     Some(status) => {
                         let _ = child.wait();
-                        for t in threads {
-                            let _ = t.join();
-                        }
+                        join_bounded(threads, Duration::from_secs(5));
                         return finish(status, stdout_buf, stderr_buf);
                     }
                     None => std::thread::sleep(Duration::from_millis(100)),
@@ -569,15 +605,44 @@ fn shutdown(
             }
         }
     }
-    let _ = child.kill();
+    kill_subtree(child);
     let status = child.wait().map_err(|e| BackendError::Io(e.to_string()))?;
-    for t in threads {
-        let _ = t.join();
-    }
+    join_bounded(threads, Duration::from_secs(5));
     // Killed after a full budget of observations: that IS the run result.
     // A nonzero-after-kill status is expected (SIGKILL), not an error.
     let _ = status;
     Ok(drain_to_string(stdout_buf, stderr_buf))
+}
+
+/// Kill the emulator subtree. Unix: the whole process group (the child is
+/// its leader via setsid at spawn). Elsewhere: the direct child only.
+fn kill_subtree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        // ESRCH (group already gone) just means graceful quit won the race.
+        unsafe {
+            killpg(child.id() as i32, SIGKILL_RAW);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+}
+
+/// Join pipe drainers, waiting at most `wait` per thread. Leftovers are
+/// detached (leaked handles, bounded buffers): after a group kill their
+/// pipes hit EOF promptly, so in practice nothing is left behind — but a
+/// surviving writer can delay us, never hang us.
+fn join_bounded(threads: Vec<std::thread::JoinHandle<()>>, wait: Duration) {
+    for t in threads {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = t.join();
+            let _ = tx.send(());
+        });
+        let _ = rx.recv_timeout(wait);
+    }
 }
 
 fn drain_to_string(stdout_buf: &Arc<Mutex<Vec<u8>>>, stderr_buf: &Arc<Mutex<Vec<u8>>>) -> String {
@@ -797,6 +862,69 @@ mod tests {
         assert_ne!(a, b);
         std::fs::remove_dir_all(&a).unwrap();
         std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    /// The cancel-during-boot hang, pinned without an emulator: a stub
+    /// launcher that forks a grandchild holding stdout (like bash `renode`
+    /// -> `dotnet Renode.dll`) and waits. Killing only the direct child
+    /// would orphan the grandchild and hang the pipe drainers forever;
+    /// the process-group kill must reap everything promptly.
+    #[test]
+    #[cfg(unix)]
+    fn kill_path_reaps_launcher_grandchildren() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("canlab-orphan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Unique grandchild identity: copy sleep under a probe name so the
+        // orphan check cannot match unrelated processes.
+        let probe = dir.join(format!("cansimcan_probe_sleep_{}", std::process::id()));
+        std::fs::copy("/bin/sleep", &probe).expect("a sleep binary to copy");
+        let stub = dir.join("stub-launcher.sh");
+        let mut f = std::fs::File::create(&stub).unwrap();
+        writeln!(f, "#!/bin/sh").unwrap();
+        writeln!(f, "{} 300 &", probe.display()).unwrap();
+        writeln!(f, "echo launcher-ready").unwrap();
+        writeln!(f, "wait").unwrap();
+        drop(f);
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Pre-tripped cancel aborts on the first supervision tick with no
+        // monitor line in sight — straight to the kill path.
+        let cancel = AtomicBool::new(true);
+        let start = Instant::now();
+        let err = run_supervised(
+            &stub,
+            Path::new("/bin/true"),
+            &[],
+            &[],
+            Duration::from_secs(120),
+            &cancel,
+        )
+        .unwrap_err();
+        assert!(matches!(err, BackendError::Cancelled), "{err}");
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "kill path must return promptly, took {:?}",
+            start.elapsed()
+        );
+        // The grandchild must actually be gone (poll: init reaps orphans
+        // asynchronously, but a leaked sleeper would persist 300 s).
+        let gone = (0..50).any(|_| {
+            let out = std::process::Command::new("pgrep")
+                .args(["-f", &probe.display().to_string()])
+                .output()
+                .expect("pgrep must exist for the orphan check");
+            if !out.status.success() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            false
+        });
+        assert!(gone, "orphaned emulator grandchild survived the kill path");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

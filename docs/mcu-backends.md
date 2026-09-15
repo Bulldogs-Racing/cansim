@@ -61,7 +61,9 @@ background while the GUI stays interactive:
 Protocol: `StartRenodeRun` / `GetRenodeJob` / `CancelRenodeJob` /
 `GetRenodeLog` / `ListRenodeJobs` / `ImportRenodeTrace` (`docs/api.md`). A running job can
 be cancelled (graceful emulator shutdown, `cancelled` state, partial
-observations discarded — cancel early, import never). Semantics: jobs run
+observations discarded — cancel early, import never). Shutdown kills the
+whole emulator process group (launcher grandchildren included), so even
+a boot-window cancel cannot strand processes or hang the job thread. Semantics: jobs run
 against project files (same contract as headless: all-`renode` nodes,
 first bus, project-relative firmware, per-node pre-checks — shared
 builder `spec_from_project` so CLI and GUI agree); import is batch-inject

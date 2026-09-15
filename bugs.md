@@ -4,6 +4,17 @@ Tracked worries that are not bugs today but will become bugs if the noted
 conditions ever hold. Check here before building concurrent editors,
 file-watching, or new execution paths.
 
+## Emulator shutdown must kill the process group, not the child
+
+`run_supervised` spawns Renode in its own group (`setsid` at spawn);
+`shutdown` kills by `killpg` and joins pipe drainers bounded. Killing
+only the direct child orphans launcher grandchildren (`bash renode` ->
+`dotnet Renode.dll`), which inherit the pipes and hang the drainers in
+`read()` forever — this was the cancel-during-boot hang (job "running"
+forever). Pinned by `kill_path_reaps_launcher_grandchildren` (stub
+launcher + `pgrep` orphan check). Do not "simplify" back to
+`child.kill()` + unbounded `join`.
+
 ## Analyzer cursor: fetch-then-adopt
 
 `Start` / `Inject` / `ImportRenodeTrace` append events *before* the client

@@ -59,6 +59,8 @@ fn ws_load_start_events_inject_reset() {
     );
 
     // Start → summary + events carry the 0x123 frame to dashboard.
+    let pre = rpc(&mut ws, r#"{"type":"GetStatus"}"#);
+    let pre_seq = pre["nextSeq"].as_u64().unwrap() as usize;
     let summary = rpc(&mut ws, r#"{"type":"Start"}"#);
     assert_eq!(summary["type"], "RunSummary");
     assert_eq!(summary["transmitted"], 1);
@@ -100,6 +102,28 @@ fn ws_load_start_events_inject_reset() {
             .get("FrameReceived")
             .is_some()),
         "a FrameReceived delivery must be nested the same way"
+    );
+
+    // Fetch-then-adopt contract (the GUI fetches since the PRE-start cursor
+    // before adopting Status.nextSeq): the Start-grown frames must sit
+    // strictly between the pre-start cursor and the post-start head.
+    // Adopting the head first would skip exactly the frames just produced.
+    let req = format!(r#"{{"type":"GetEvents","sinceSeq":{pre_seq}}}"#);
+    let grown = rpc(&mut ws, &req);
+    let grown_rows = grown["events"].as_array().unwrap();
+    assert!(!grown_rows.is_empty());
+    assert!(
+        grown_rows
+            .iter()
+            .enumerate()
+            .all(|(i, e)| e["seq"] == (pre_seq + i) as u64),
+        "grown events must continue the pre-start sequence without gaps"
+    );
+    assert!(
+        serde_json::to_string(&grown)
+            .unwrap()
+            .contains("\"Standard\":291"),
+        "the 0x123 frame must be fetchable since the pre-start cursor"
     );
 
     // Polling with a fresh cursor yields nothing new.

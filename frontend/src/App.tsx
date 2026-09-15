@@ -88,11 +88,14 @@ export default function App(): JSX.Element {
 
   /** Adopt a Status reply: engine state, dirty chip, and event cursor. Rows
    *  past the cursor belong to a previous engine incarnation — drop them so
-   *  the analyzer always reflects the current log. */
+   *  the analyzer always reflects the current log. Skipped while capture is
+   *  paused (frozen view must not advance or prune; callers that rebuild
+   *  the engine reset the cursor explicitly). */
   const applyStatus = useCallback((reply: StatusMsg) => {
     setState(reply.state);
     setLoadedPath(reply.projectPath);
     setDirty(reply.dirty);
+    if (pausedRef.current) return;
     cursorRef.current = reply.nextSeq;
     setRows((prev) => prev.filter((r) => r.seq < reply.nextSeq));
   }, []);
@@ -234,8 +237,11 @@ export default function App(): JSX.Element {
       if (reply.type === "RunSummary") {
         setSummary(`${reply.transmitted} transmitted, ${reply.received} received`);
       }
-      await refreshStatus(api);
+      // Fetch-then-adopt: Start/Inject/Step append events BEFORE the Status
+      // reply is read, so poll with the pre-Status cursor first — adopting
+      // the grown cursor first would skip exactly the frames just produced.
       await pollEvents();
+      await refreshStatus(api);
     } catch (e) {
       showError(e instanceof Error ? e.message : String(e));
     }
@@ -257,7 +263,16 @@ export default function App(): JSX.Element {
         showError(`${label}: ${err}`);
         return;
       }
-      if (reply.type === "Status") applyStatus(reply);
+      // Every edit rebuilds the engine, so the log restarts: drop ALL rows,
+      // not just rows past the cursor — survivors with low seq numbers would
+      // belong to the previous topology (see bugs.md). The cursor resets
+      // even when capture is paused (applyStatus freezes it then).
+      if (reply.type === "Status") {
+        applyStatus(reply);
+        cursorRef.current = reply.nextSeq;
+      }
+      setRows([]);
+      setSelected(null);
       await refreshProject(api);
     } catch (e) {
       showError(e instanceof Error ? e.message : String(e));
@@ -288,9 +303,10 @@ export default function App(): JSX.Element {
       } else if (reply.type === "TraceImported") {
         setSummary(`Imported firmware traffic: ${reply.transmitted} transmitted, ${reply.received} received.`);
       }
+      // Same fetch-then-adopt as runCmd: import appends before Status is read.
+      await pollEvents();
       await refreshStatus(api);
       await refreshJobs();
-      await pollEvents();
     } catch (e) {
       showError(e instanceof Error ? e.message : String(e));
     }

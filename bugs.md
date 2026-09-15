@@ -4,6 +4,25 @@ Tracked worries that are not bugs today but will become bugs if the noted
 conditions ever hold. Check here before building concurrent editors,
 file-watching, or new execution paths.
 
+## Analyzer cursor: fetch-then-adopt
+
+`Start` / `Inject` / `ImportRenodeTrace` append events *before* the client
+reads `Status.nextSeq`. The GUI must `GetEvents` since the pre-command
+cursor *before* adopting the grown `Status` cursor (`runCmd`/`renodeCmd`
+poll first, adopt second) — adopting first skips exactly the frames just
+produced and the analyzer stays empty. This bit us twice (empty table
+after Run even with correct parsing); `tests/ws_api.rs` pins the
+server side (frames sit between pre-start cursor and post-start head).
+
+Becomes a real bug again if any new command both appends events and
+returns `Status` (or a cursor) that a client adopts before fetching.
+Rule: fetch since the old cursor first, adopt second — or split the
+reply so growth and cursor-adoption cannot be reordered. Corollaries in
+`App.tsx`: while capture is paused `applyStatus` must not advance/prune
+(else a paused Run's frames are lost on resume), while engine-rebuilding
+edits must reset the cursor even when paused (else the rebuilt log,
+restarted at 0, sits forever below a stale cursor).
+
 ## Scripted-message addressing is index-based
 
 `UpdateMessage` / `RemoveMessage` take a list index, so rows shift after

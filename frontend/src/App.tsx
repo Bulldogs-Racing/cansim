@@ -21,6 +21,7 @@ import {
   MessageDecl,
   NodeDecl,
   parseIdFilter,
+  rowsToPcap,
   ProjectBus,
   ProjectNode,
   RenodeJob,
@@ -446,11 +447,21 @@ export default function App(): JSX.Element {
   }, [rows]);
 
   const exportJson = useCallback(() => {
-    const payload = rows.map((r) => ({ seq: r.seq, timeMs: r.timeNs / 1e6, dir: r.dir, node: r.node, id: r.id, dlc: r.dlc, data: r.data }));
+    const payload = rows.map((r) => ({ seq: r.seq, timeMs: r.timeNs / 1e6, dir: r.dir, node: r.node, id: r.id, dlc: r.dlc, data: r.data, remote: r.remote }));
     const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
     const a = document.createElement("a");
     a.href = url;
     a.download = "canlab-trace.json";
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [rows]);
+
+  const exportPcap = useCallback(() => {
+    const bytes = rowsToPcap(rows);
+    const url = URL.createObjectURL(new Blob([bytes], { type: "application/vnd.tcpdump.pcap" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "canlab-trace.pcap";
     a.click();
     URL.revokeObjectURL(url);
   }, [rows]);
@@ -637,6 +648,7 @@ export default function App(): JSX.Element {
           <button style={btn} onClick={clearAnalyzer}>Clear</button>
           <button style={btn} onClick={exportCsv}>Export CSV</button>
           <button style={btn} onClick={exportJson}>Export JSON</button>
+          <button style={btn} onClick={exportPcap}>Export PCAP</button>
           <span style={{ color: "#9ca3af" }}>{visibleRows.length} row(s){rows.length >= MAX_ROWS ? ` (capped at ${MAX_ROWS})` : ""}</span>
           {idFilterSpec.kind === "invalid" && <span role="alert" style={{ color: "#fca5a5" }}>{idFilterSpec.message}</span>}
         </div>
@@ -668,6 +680,7 @@ export default function App(): JSX.Element {
                 <dt>Direction</dt><dd>{selected.dir}</dd>
                 <dt>Node</dt><dd>{selected.node}</dd>
                 <dt>DLC</dt><dd>{selected.dlc}</dd>
+                <dt>Frame</dt><dd>{selected.remote ? "Remote (RTR, no payload)" : "Data"}</dd>
                 <dt>Data</dt><dd style={{ fontFamily: "monospace" }}>{selected.data || "(empty)"}</dd>
                 <dt>Timestamp</dt><dd>{fmtTimeNs(selected.timeNs)}</dd>
               </dl>

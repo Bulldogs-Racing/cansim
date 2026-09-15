@@ -73,6 +73,7 @@ docs/             user + developer documentation
 - [x] Phase 4 (WS part, slice 1) — Renode job table over WS: StartRenodeRun/GetRenodeJob/ListRenodeJobs/ImportRenodeTrace, `--max-jobs` (default 1), trace import into the session engine (live-verified: `tests/renode_ws.rs`)
 - [x] Phase 9 (slice 1) — deterministic single-shot faults end to end: FlipBit/CorruptCrc/DropFrame via engine → session → WS InjectFault → GUI panel, DROP analyzer rows, `docs/fault-injection.md` (probabilistic policies deferred)
 - [x] Observability slice — `canlab replay`: deterministic headless re-run of `--export-json` traces (bit-identical logs, verified by replay-of-replay diff)
+- [x] Export slice — PCAP export (`DLT_CAN_SOCKETCAN`, simulated timestamps, EFF/RTR flags incl. RTR-aware analyzer rows + inspector), verified by byte-level parse-back
 - [ ] Phase 4 (WS part, slice 2) — job cancellation, per-job UART over WS, Renode console/debugger surfacing (§50–§51)
 - [ ] Phase 7 — accuracy-first MCP2515 virtual execution + SPI timing
 - [ ] Phase 6+ — analyzer sorting/search, Teensy, faults, FD, DBC

@@ -286,6 +286,8 @@ export interface AnalyzerRow {
   id: string;
   dlc: number;
   data: string;
+  /** Remote (RTR) frames carry no payload; dlc is the requested length. */
+  remote: boolean;
 }
 
 /** Extract analyzer rows (TX/RX frame deliveries) from polled events.
@@ -299,14 +301,59 @@ export function analyzerRows(events: SeqEvent[]): AnalyzerRow[] {
     if (!inner || typeof inner !== "object") continue;
     if ("FrameTransmitted" in inner) {
       const { sender, frame } = inner.FrameTransmitted;
-      rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "TX", node: sender, id: idToHex(frame.id), dlc: frame.dlc, data: bytesToHex(frame.data) });
+      rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "TX", node: sender, id: idToHex(frame.id), dlc: frame.dlc, data: bytesToHex(frame.data), remote: frame.is_remote });
     } else if ("FrameReceived" in inner) {
       const { receiver, frame } = inner.FrameReceived;
-      rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "RX", node: receiver, id: idToHex(frame.id), dlc: frame.dlc, data: bytesToHex(frame.data) });
+      rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "RX", node: receiver, id: idToHex(frame.id), dlc: frame.dlc, data: bytesToHex(frame.data), remote: frame.is_remote });
     } else if ("FrameDropped" in inner) {
       const { sender, frame } = inner.FrameDropped;
-      rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "DROP", node: sender, id: idToHex(frame.id), dlc: frame.dlc, data: bytesToHex(frame.data) });
+      rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "DROP", node: sender, id: idToHex(frame.id), dlc: frame.dlc, data: bytesToHex(frame.data), remote: frame.is_remote });
     }
   }
   return rows;
+}
+
+/** PCAP export (§47, SocketCAN link type): analyzer rows as one
+ *  `DLT_CAN_SOCKETCAN` (227) capture with simulated timestamps.
+ *  Pure bytes (no DOM) so a script can parse them back and verify. */
+export const PCAP_DLT_CAN_SOCKETCAN = 227;
+const CAN_EFF_FLAG = 0x80000000;
+const CAN_RTR_FLAG = 0x40000000;
+
+export function rowsToPcap(rows: AnalyzerRow[]): Uint8Array {
+  const out: number[] = [];
+  const le32 = (n: number) => {
+    out.push(n & 0xff, (n >>> 8) & 0xff, (n >>> 16) & 0xff, (n >>> 24) & 0xff);
+  };
+  const le16 = (n: number) => {
+    out.push(n & 0xff, (n >>> 8) & 0xff);
+  };
+  // Global header, little-endian magic.
+  le32(0xa1b2c3d4);
+  le16(2);
+  le16(4);
+  le32(0); // thiszone
+  le32(0); // sigfigs
+  le32(72); // snaplen
+  le32(PCAP_DLT_CAN_SOCKETCAN);
+  for (const r of rows) {
+    const idNum = Number(r.id);
+    if (!Number.isInteger(idNum) || idNum < 0 || idNum > 0x1fffffff) continue;
+    const dataBytes =
+      r.data.trim() === "" ? [] : r.data.trim().split(/\s+/).map((b) => Number(`0x${b}`));
+    if (dataBytes.some((b) => !Number.isInteger(b) || b < 0 || b > 0xff)) continue;
+    const sec = Math.floor(r.timeNs / 1e9);
+    const usec = Math.floor((r.timeNs % 1e9) / 1000);
+    le32(sec);
+    le32(usec);
+    le32(16); // incl_len: struct can_frame
+    le32(16); // orig_len
+    let canId = idNum;
+    if (idNum > 0x7ff) canId |= CAN_EFF_FLAG;
+    if (r.remote) canId |= CAN_RTR_FLAG;
+    le32(canId >>> 0);
+    out.push(r.dlc & 0xff, 0, 0, 0); // dlc + 3 pad bytes
+    for (let i = 0; i < 8; i++) out.push(dataBytes[i] ?? 0);
+  }
+  return new Uint8Array(out);
 }

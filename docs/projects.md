@@ -38,6 +38,24 @@ messages:
 
 Backwards compatible: projects without it run the built-in demo frame.
 
+## Deterministic fault policies
+
+`faults:` (optional) attaches seeded wire-fault policies to normal
+transmissions (first match wins, per-rule streams):
+
+```yaml
+faults:
+  - fault: DropFrame
+    node: dashboard
+    probability: 0.5
+    seed: 42
+```
+
+`fault` is `{"FlipBit": offset}` / `"CorruptCrc"` / `"DropFrame"`;
+`node` / `id` (+ `extended`) narrow eligibility; `probability` is
+`0.0..=1.0`. Same project, same log — always. See
+`docs/fault-injection.md` (incl. replay interaction).
+
 ## Safety rules (§21)
 
 Project files are untrusted input. Validation enforces:

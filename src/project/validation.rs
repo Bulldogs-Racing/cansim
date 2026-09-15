@@ -209,6 +209,32 @@ pub fn validate_project(proj: &Project, base_dir: &std::path::Path) -> Validatio
         }
     }
 
+    for (i, f) in proj.faults.iter().enumerate() {
+        let at = format!("faults[{i}]");
+        if let Some(node) = &f.node {
+            if !node_ids.contains(node) {
+                rep.errors
+                    .push(err(&at, format!("unknown node \"{node}\"")));
+            }
+        }
+        if !(0.0..=1.0).contains(&f.probability) {
+            rep.errors.push(err(
+                &at,
+                format!(
+                    "probability {} out of range (expected 0.0..=1.0)",
+                    f.probability
+                ),
+            ));
+        }
+        if let Some(id) = f.id {
+            let max = if f.extended { 0x1FFF_FFFF } else { 0x7FF };
+            if id > max {
+                rep.errors
+                    .push(err(&at, format!("id {id:#X} out of range (max {max:#X})")));
+            }
+        }
+    }
+
     rep
 }
 
@@ -232,6 +258,45 @@ nodes:
         let p = Project::parse(GOOD).unwrap();
         let rep = validate_project(&p, std::path::Path::new("."));
         assert!(rep.is_ok(), "unexpected errors: {:?}", rep.errors);
+    }
+
+    #[test]
+    fn fault_policies_validate_ranges_and_refs() {
+        let base = format!(
+            "{GOOD}\nfaults:\n  - {{fault: CorruptCrc, node: engine_ecu, id: 0x100, probability: 0.25, seed: 11}}\n  - {{fault: DropFrame, probability: 1.0, seed: 12}}\n"
+        );
+        let p = Project::parse(&base).unwrap();
+        assert_eq!(p.faults.len(), 2);
+        let rep = validate_project(&p, std::path::Path::new("."));
+        assert!(rep.is_ok(), "unexpected errors: {:?}", rep.errors);
+
+        for (faults_yaml, needle) in [
+            (
+                "  - {fault: DropFrame, node: ghost, probability: 0.5, seed: 1}\n",
+                "unknown node",
+            ),
+            (
+                "  - {fault: DropFrame, probability: 1.5, seed: 1}\n",
+                "probability",
+            ),
+            (
+                "  - {fault: DropFrame, probability: -0.1, seed: 1}\n",
+                "probability",
+            ),
+            (
+                "  - {fault: DropFrame, id: 0x800, probability: 0.5, seed: 1}\n",
+                "out of range",
+            ),
+        ] {
+            let bad = format!("{GOOD}\nfaults:\n{faults_yaml}");
+            let p = Project::parse(&bad).unwrap();
+            let rep = validate_project(&p, std::path::Path::new("."));
+            assert!(
+                rep.errors.iter().any(|e| e.message.contains(needle)),
+                "expected '{needle}' in {:?}",
+                rep.errors
+            );
+        }
     }
 
     #[test]

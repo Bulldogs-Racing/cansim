@@ -118,7 +118,9 @@ The GUI is a web app with three parts: a network **canvas**, run/simulation
   dotnet runtime if your renode requires it (`canlab doctor` tells you).
 - **Fault injection**: drive one corrupted frame now (flip a wire bit,
   corrupt the CRC, or drop the frame). Dropped frames show as DROP rows;
-  the outcome line names the detection kind. Details:
+  the outcome line names the detection kind. Projects can also declare
+  seeded `faults:` policies applied to every Run
+  (`examples/faults.canlab.yaml`). Details:
   `docs/fault-injection.md`.
 - The API repo note in-app always assumes `canlab serve` runs from the repo
   root.

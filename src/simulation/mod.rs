@@ -5,5 +5,5 @@ pub mod engine;
 pub mod event;
 
 pub use clock::{ClockError, SimClock};
-pub use engine::{Engine, EngineError, EngineState};
+pub use engine::{Engine, EngineError, EngineState, FaultRule};
 pub use event::{SimEvent, SimEventKind};

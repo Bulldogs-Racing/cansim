@@ -19,7 +19,7 @@ use crate::project::schema::{BusDecl, MessageDecl, NodeDecl};
 use crate::project::validation::KNOWN_BACKENDS;
 use crate::project::validation::KNOWN_DEVICES;
 use crate::project::{validate_project, Project};
-use crate::simulation::engine::{Engine, EngineError, EngineState};
+use crate::simulation::engine::{Engine, EngineError, EngineState, FaultRule};
 use crate::simulation::event::SimEvent;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -211,6 +211,7 @@ impl Session {
                 buses: Vec::new(),
                 nodes: Vec::new(),
                 messages: Vec::new(),
+                faults: Vec::new(),
             },
             node_bus: HashMap::new(),
             dirty: true,
@@ -624,7 +625,27 @@ fn build_engine(
         engine.register_node(&n.can.bus, &n.id)?;
         node_bus.insert(n.id.clone(), n.can.bus.clone());
     }
+    // Deterministic fault policies ride with the project: every rebuild
+    // (load/edit/save) reseeds them, so runs reproduce exactly.
+    engine.set_fault_rules(fault_rules_from_project(proj));
     Ok((engine, node_bus))
+}
+
+/// Map a project's `faults:` policies to engine rules (shared by the
+/// session and the headless CLI so both honor identical policies).
+pub fn fault_rules_from_project(proj: &Project) -> Vec<FaultRule> {
+    proj.faults
+        .iter()
+        .map(|f| {
+            FaultRule::new(
+                f.fault,
+                f.node.clone(),
+                f.id.map(|id| (id, f.extended)),
+                f.probability,
+                f.seed,
+            )
+        })
+        .collect()
 }
 
 fn flatten(rep: &crate::project::ValidationReport) -> String {
@@ -838,6 +859,36 @@ messages:
         assert!(t >= 1000);
         s.reset().unwrap();
         assert_eq!(s.state(), EngineState::Idle);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_fault_policies_apply_to_scripted_runs() {
+        use crate::can::bus::{BusEvent, BusEventKind};
+        use crate::simulation::event::SimEventKind;
+
+        // A certain drop on the sender: transmits but delivers nothing,
+        // with a visible drop event in the log.
+        let dir = tmpdir("faultrun");
+        let path = write_project(
+            &dir,
+            "p.canlab",
+            &format!(
+                "{TWO_NODES}\nfaults:\n  - {{fault: DropFrame, node: engine_ecu, probability: 1.0, seed: 5}}\n"
+            ),
+        );
+        let mut s = Session::new();
+        s.load(&path).unwrap();
+        let summary = s.start().unwrap();
+        assert_eq!(summary.transmitted, 1);
+        assert_eq!(summary.received, 0);
+        assert!(s.events().iter().any(|e| matches!(
+            &e.kind,
+            SimEventKind::BusTraffic(BusEvent {
+                kind: BusEventKind::FrameDropped { .. },
+                ..
+            })
+        )));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

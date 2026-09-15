@@ -1,0 +1,49 @@
+# Deterministic fault policies (Phase 9 slice 2): seeded, reproducible.
+# Every normal transmission draws per matching rule; first match wins.
+version: 1
+
+simulation:
+  mode: deterministic
+
+buses:
+  - id: vehicle_bus
+    type: can
+    bitrate: 500000
+    fd: false
+
+nodes:
+  - id: engine_ecu
+    device: stm32f103
+    backend: virtual
+    can:
+      bus: vehicle_bus
+
+  - id: dashboard
+    device: arduino_uno
+    backend: virtual
+    can:
+      bus: vehicle_bus
+
+messages:
+  - sender: engine_ecu
+    id: 0x123
+    data: [0x01, 0x02, 0x03, 0x04]
+  - sender: dashboard
+    id: 0x200
+    data: [0x20, 0x01, 0x00, 0x00]
+  - sender: engine_ecu
+    id: 0x123
+    data: [0x05, 0x06, 0x07, 0x08]
+
+faults:
+  # Half the dashboard frames never reach the bus (seeded stream).
+  - fault: DropFrame
+    node: dashboard
+    probability: 0.5
+    seed: 42
+  # Corrupt every third-ish engine frame's CRC (seeded stream).
+  - fault: CorruptCrc
+    node: engine_ecu
+    id: 0x123
+    probability: 0.5
+    seed: 7

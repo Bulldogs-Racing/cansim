@@ -38,7 +38,7 @@ pub enum ProjectError {
     Io(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub version: u32,
     #[serde(default)]
@@ -50,6 +50,10 @@ pub struct Project {
     /// Optional scripted demo traffic for headless runs.
     #[serde(default)]
     pub messages: Vec<MessageDecl>,
+    /// Optional deterministic fault policies (Phase 9 slice 2): seeded,
+    /// reproducible wire faults applied to normal transmissions.
+    #[serde(default)]
+    pub faults: Vec<FaultDecl>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -108,6 +112,27 @@ pub struct MessageDecl {
     /// If true, `id` is interpreted as extended 29-bit.
     #[serde(default)]
     pub extended: bool,
+}
+
+/// One deterministic fault policy: when a normal transmission matches the
+/// optional `node`/`id` filters, draw from the seeded stream — a draw
+/// below `probability` faults the frame with `fault`. First matching rule
+/// wins; each rule draws from its own stream, so runs reproduce exactly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FaultDecl {
+    pub fault: crate::can::bus::WireFault,
+    /// If set, only this node's transmissions are eligible.
+    #[serde(default)]
+    pub node: Option<String>,
+    /// If set, only this frame id is eligible (`extended` selects 29-bit).
+    #[serde(default)]
+    pub id: Option<u32>,
+    #[serde(default)]
+    pub extended: bool,
+    /// Per-transmission fault probability in [0.0, 1.0].
+    pub probability: f64,
+    /// Seed for this rule's draw stream (reproducibility).
+    pub seed: u64,
 }
 
 impl Project {

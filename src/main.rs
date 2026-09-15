@@ -10,13 +10,13 @@
 //!   visual editor (§4); the GUI drives this, never the engine directly
 //! - `canlab doctor` — environment diagnostics (Renode, toolchains, SocketCAN)
 
-use cansimcan::can::bus::CanBusConfig;
+use cansimcan::can::bus::{CanBusConfig, WireFault};
 use cansimcan::can::frame::CanFrame;
 use cansimcan::can::id::CanId;
 use cansimcan::can::timing::NS_PER_MS;
 use cansimcan::project::{validate_project, Project};
 use cansimcan::simulation::engine::Engine;
-use cansimcan::simulation::event::{extract_transmissions, SimEvent};
+use cansimcan::simulation::event::{extract_replay_script, SimEvent};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
@@ -252,6 +252,15 @@ fn fmt_time(t_ns: u64) -> String {
     format!("{:.3} ms", t_ns as f64 / NS_PER_MS as f64)
 }
 
+/// Renders `Some(kind)` as ", observed <kind>" and `None` as "" — the
+/// fault-note suffix for timeline TX lines.
+fn observed(err: &Option<cansimcan::can::errors::CanErrorKind>) -> String {
+    match err {
+        Some(kind) => format!(", observed {kind}"),
+        None => String::new(),
+    }
+}
+
 /// Lexical `.` cleanup for display/CLI paths (no FS access; `..` is
 /// rejected earlier by project validation, so only `.` needs collapsing).
 fn normalize(path: &Path) -> PathBuf {
@@ -373,7 +382,7 @@ fn cmd_simulate_virtual(proj: &Project, export_json: Option<&Path>) -> i32 {
 
     // Scripted traffic, or the canonical §74 demo frame when the project
     // declares no `messages:` (id ranges pre-validated, so unwraps are safe).
-    let script: Vec<(String, CanFrame)> = if proj.messages.is_empty() {
+    let script: Vec<(String, CanFrame, Option<WireFault>)> = if proj.messages.is_empty() {
         vec![(
             proj.nodes[0].id.clone(),
             CanFrame::new(
@@ -381,6 +390,7 @@ fn cmd_simulate_virtual(proj: &Project, export_json: Option<&Path>) -> i32 {
                 &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
             )
             .unwrap(),
+            None,
         )]
     } else {
         proj.messages
@@ -391,11 +401,11 @@ fn cmd_simulate_virtual(proj: &Project, export_json: Option<&Path>) -> i32 {
                 } else {
                     CanId::new_standard(m.id as u16).unwrap()
                 };
-                (m.sender.clone(), CanFrame::new(id, &m.data).unwrap())
+                (m.sender.clone(), CanFrame::new(id, &m.data).unwrap(), None)
             })
             .collect()
     };
-    run_virtual_timeline(proj, &script, "transmitted", export_json)
+    run_virtual_timeline(proj, &script, "transmitted", export_json, true)
 }
 
 /// Replay a recorded event-log trace deterministically (§54, headless
@@ -435,7 +445,7 @@ fn cmd_replay(project: &Path, trace: &Path, export_json: Option<&Path>) -> i32 {
             return 1;
         }
     };
-    let script = extract_transmissions(&events);
+    let script = extract_replay_script(&events);
     if script.is_empty() {
         println!(
             "Trace {} holds no transmitted frames — nothing to replay.",
@@ -450,7 +460,7 @@ fn cmd_replay(project: &Path, trace: &Path, export_json: Option<&Path>) -> i32 {
     );
     println!();
     print_run_header(&proj);
-    run_virtual_timeline(&proj, &script, "replayed", export_json)
+    run_virtual_timeline(&proj, &script, "replayed", export_json, false)
 }
 
 fn print_run_header(proj: &Project) {
@@ -473,13 +483,17 @@ fn print_run_header(proj: &Project) {
 
 /// Shared headless timeline: fresh engine, all nodes on the first bus
 /// (multi-bus routing deferred, §72 — same note as before), one
-/// §75-style TX/RX line per frame, deterministic timestamps.
+/// §75-style TX/RX line per frame, deterministic timestamps. Project
+/// fault policies apply unless `apply_faults` is false (replay reproduces
+/// the recorded traffic exactly instead of re-drawing faults).
 fn run_virtual_timeline(
     proj: &Project,
-    script: &[(String, CanFrame)],
+    script: &[(String, CanFrame, Option<WireFault>)],
     verb: &str,
     export_json: Option<&Path>,
+    apply_faults: bool,
 ) -> i32 {
+    use cansimcan::server::session::fault_rules_from_project;
     let mut engine = Engine::new();
     for b in &proj.buses {
         if let Err(e) = engine.add_bus(CanBusConfig::new(b.id.clone(), b.bitrate).unwrap()) {
@@ -504,22 +518,48 @@ fn run_virtual_timeline(
             return 1;
         }
     }
+    engine.set_fault_rules(fault_rules_from_project(proj));
+    engine.set_faults_enabled(apply_faults);
     engine.start();
 
     let mut tx_count = 0u64;
     let mut rx_count = 0u64;
 
-    for (sender, frame) in script {
+    for (sender, frame, script_fault) in script {
         let t = engine.now();
-        match engine.transmit(&bus, sender, frame.clone()) {
-            Ok(out) => {
+        // Scripted drops (replay) re-drive explicitly; everything else goes
+        // through the policy-aware transmit (rules off during replay).
+        let outcome = match script_fault {
+            Some(fault) => engine
+                .transmit_with_fault(&bus, sender, frame.clone(), *fault)
+                .map(|o| (o.receivers, Some(o.fault), o.error)),
+            None => engine
+                .transmit(&bus, sender, frame.clone())
+                .map(|o| (o.receivers, o.fault, o.error)),
+        };
+        match outcome {
+            Ok((receivers, fault, error)) => {
+                // Policy-fired and scripted faults mark the TX line (drops
+                // and errored frames print no RX lines, but the TX line
+                // alone would read as a clean transmission).
+                let fault_note = match (&fault, &error) {
+                    (None, _) => String::new(),
+                    (Some(WireFault::DropFrame), _) => " [dropped, drove nothing]".to_string(),
+                    (Some(WireFault::FlipBit(offset)), err) => {
+                        format!(" [fault: wire bit {offset} flipped{}]", observed(err))
+                    }
+                    (Some(WireFault::CorruptCrc), err) => {
+                        format!(" [fault: CRC corrupted{}]", observed(err))
+                    }
+                };
                 println!(
-                    "[{}] {sender} TX {} [{}]",
+                    "[{}] {sender} TX {} [{}]{}",
                     fmt_time(t),
                     frame.id,
-                    frame.data_hex()
+                    frame.data_hex(),
+                    fault_note
                 );
-                for rx in &out.receivers {
+                for rx in &receivers {
                     println!(
                         "[{}] {rx} RX {} [{}]",
                         fmt_time(t),
@@ -528,7 +568,7 @@ fn run_virtual_timeline(
                     );
                 }
                 tx_count += 1;
-                rx_count += out.receivers.len() as u64;
+                rx_count += receivers.len() as u64;
             }
             Err(e) => {
                 eprintln!("transmission from {sender} failed: {e}");

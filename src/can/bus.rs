@@ -157,6 +157,9 @@ pub struct TransmissionOutcome {
     pub acked: bool,
     /// Detection kind when the transmission errored, if any.
     pub error: Option<CanErrorKind>,
+    /// Policy-fired fault that produced this outcome, if any (engine
+    /// fault rules; explicit single-shots report via `FaultOutcome`).
+    pub fault: Option<WireFault>,
     pub time_ns: SimNanos,
 }
 
@@ -249,6 +252,16 @@ impl CanBus {
 
     pub fn clear_events(&mut self) {
         self.events.clear();
+    }
+
+    /// Forget wire-time tracking (monotonicity baseline). Engine reset
+    /// needs this: the simulation clock returns to 0, so the bus must
+    /// accept t=0 again. Error counters are deliberately untouched —
+    /// this is simulation control, not per-CPU re-init (see `reset_node`).
+    pub fn reset_time(&mut self) {
+        self.events.clear();
+        self.last_time_ns = 0;
+        self.has_time = false;
     }
 
     pub fn register_node(
@@ -365,6 +378,7 @@ impl CanBus {
                 receivers,
                 acked: false,
                 error: Some(CanErrorKind::Ack),
+                fault: None,
                 time_ns: at_ns,
             });
         }
@@ -384,6 +398,7 @@ impl CanBus {
             receivers,
             acked: true,
             error: None,
+            fault: None,
             time_ns: at_ns,
         })
     }

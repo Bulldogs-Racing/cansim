@@ -72,6 +72,7 @@ docs/             user + developer documentation
 - [x] Phase 6 (slice 2) — analyzer sorting (newest/oldest) + structured ID filter (exact/range/mask, harness-verified). Arbitration-loss rows deferred: no live path emits simultaneous rounds yet (§34 needs engine exposure first)
 - [x] Phase 4 (WS part, slice 1) — Renode job table over WS: StartRenodeRun/GetRenodeJob/ListRenodeJobs/ImportRenodeTrace, `--max-jobs` (default 1), trace import into the session engine (live-verified: `tests/renode_ws.rs`)
 - [x] Phase 9 (slice 1) — deterministic single-shot faults end to end: FlipBit/CorruptCrc/DropFrame via engine → session → WS InjectFault → GUI panel, DROP analyzer rows, `docs/fault-injection.md` (probabilistic policies deferred)
+- [x] Phase 9 (slice 2) — seeded project policies (`faults:`): per-rule streams, first-match-wins, reset/load reseeds, CLI + session + headless parity, marked timeline lines, replay opts out (drops re-driven exactly). Fixed alongside: `Engine::reset` now resets bus time (Reset→Run was broken) — counters untouched. WS CRUD deferred
 - [x] Observability slice — `canlab replay`: deterministic headless re-run of `--export-json` traces (bit-identical logs, verified by replay-of-replay diff)
 - [x] Export slice — PCAP export (`DLT_CAN_SOCKETCAN`, simulated timestamps, EFF/RTR flags incl. RTR-aware analyzer rows + inspector), verified by byte-level parse-back
 - [x] Phase 12 (slice 1) — DBC subset: message/signal parsing + Intel/Motorola decoding + `canlab dbc` CLI (`docs/dbc.md`, `examples/vehicle.dbc`; multiplexing deferred)

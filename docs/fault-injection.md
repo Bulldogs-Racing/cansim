@@ -1,12 +1,13 @@
-# Fault injection (PROMPT.md §35–§36, Phase 9 slice 1)
+# Fault injection (PROMPT.md §35–§36, Phase 9 slices 1–2)
 
-Deterministic, single-shot wire faults. No randomness, no probabilities
-yet — every fault names its exact target, so runs stay reproducible.
+Deterministic faults, two layers: single-shot ad-hoc frames, and seeded
+project policies. No randomness anywhere — every fault names its exact
+target or seed, so runs stay reproducible.
 
-## What exists today
+## Single-shot frames
 
-Three fault kinds, implemented at the bus level (`CanBus::transmit_with_fault`)
-and exposed through the whole stack (engine → session → WebSocket → GUI panel):
+Drive one corrupted frame now, via the GUI *Fault injection* panel or
+over WS (`InjectFault`):
 
 | Fault | Effect | Analyzer shows |
 |---|---|---|
@@ -35,11 +36,46 @@ Replies carry the ground truth: `FaultInjected { error, receivers,
 nextSeq }`, where `error` is the detection kind (`Bit`/`Stuff`/`Crc`/
 `Form`/`Ack`) or null when the frame decoded clean (or was dropped).
 
+## Project policies (`faults:`)
+
+Seeded probabilistic faults for whole runs (`examples/faults.canlab.yaml`):
+
+```yaml
+faults:
+  - fault: DropFrame
+    node: dashboard        # optional: only this sender (omit = all)
+    id: 0x200              # optional: only this id (extended: true = 29-bit)
+    probability: 0.5       # per-transmission, 0.0..=1.0
+    seed: 42               # this rule's draw stream
+```
+
+Semantics:
+
+- Every *normal* transmission (scripted, injected, imported, headless)
+  checks the rules in order; the first matching rule draws from its own
+  seeded stream and faults the frame on a draw below `probability`.
+  Ineligible rules never advance their stream, so unrelated rules cannot
+  perturb each other's draws.
+- Same project + same operation order = identical event log, always
+  (verified by record → record diff). `Reset` reseeds to the deterministic
+  start; every load/edit/save rebuild reseeds too.
+- Explicit single-shots (`InjectFault`, arbitration rounds) never draw.
+- CLI timelines mark faulted lines (`[dropped, drove nothing]`,
+  `[fault: CRC corrupted, observed CRC error]`).
+- **Replay interaction**: replay disables policies and re-drives drops
+  exactly (`FrameDropped` rows carry the fault), but transmitted-yet-
+  errored frames (e.g. CRC) replay clean — their corruption is not
+  recoverable from the trace. The replayed log therefore matches the
+  record except for re-faulted deliveries.
+- WS CRUD for policies is deferred: author them in the project file
+  (validated like `messages:`); `GetProject` returns them and every Run
+  honors them, GUI included.
+
 ## Deferred (explicit)
 
-- Probabilistic policies (`probability`/`duration`/`seed`, §36), bus-line
-  faults (disconnect CANH/CANL, force dominant/recessive), node faults
-  (force bus-off, disable, latency), and the Phase 9 UI matrix from §35.
+- Bus-line faults (disconnect CANH/CANL, force dominant/recessive),
+  node faults (force bus-off, disable, latency), durations, and the full
+  Phase 9 UI matrix from §35.
 - The `FlipBit` offset counts stuffed-wire bits (`SOF..EOF`); a future
   field-aware selector (SOF/arbitration/control/data/CRC/ACK/EOF) layers
   on top without changing these semantics.

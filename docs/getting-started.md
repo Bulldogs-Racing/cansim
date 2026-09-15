@@ -141,7 +141,18 @@ cargo run -q --bin canlab -- replay examples/two_nodes.canlab.yaml trace.json
 Replay re-transmits every recorded TX frame in order through a fresh
 engine on a virtual project — same timeline, same timestamps,
 bit-identical event log. Useful for debugging: capture once, re-run the
-exact traffic while you inspect it.
+exact traffic while you inspect it. (Fault policies stay off during
+replay; recorded drops re-drive exactly, transmitted-yet-errored frames
+replay clean — see `docs/fault-injection.md`.)
+
+## Fault-policy runs
+
+```bash
+cargo run -q --bin canlab -- simulate examples/faults.canlab.yaml
+```
+
+Seeded `faults:` policies fault matching transmissions deterministically;
+the timeline marks faulted lines. Same project, same log — every time.
 
 ## Run the tests
 

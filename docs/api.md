@@ -64,10 +64,25 @@ canlab serve --port 21011 [--project <file>]
 ## Event stream (§52–§53)
 
 `Events[i].seq === i` always; clients resume from `nextSeq`. `kind` is the
-serialized `SimEventKind`: lifecycle markers plus `BusTraffic(...)` with
-the full `CanFrame` (`id` as `{Standard: n}` / `{Extended: n}`, `dlc`,
+serialized `SimEventKind`: lifecycle markers plus `BusTraffic(BusEvent)`
+with the full `CanFrame` (`id` as `{Standard: n}` / `{Extended: n}`, `dlc`,
 `data` bytes). The frontend formats IDs (`idToHex`) and timestamps
 (`fmtTimeNs`); the server never pre-formats.
+
+Nesting (exact — the analyzer once read one level too shallow and showed
+nothing; `tests/ws_api.rs` pins this shape):
+
+```json
+{ "seq": 3, "timeNs": 0,
+  "kind": { "BusTraffic": {
+    "time_ns": 0,
+    "kind": { "FrameTransmitted": {
+      "sender": "engine_ecu",
+      "frame": { "id": { "Standard": 291 }, "dlc": 4, "data": [1, 2, 3, 4] } } } } } }
+```
+
+i.e. `event.kind.BusTraffic.kind` carries the variant, not
+`event.kind.BusTraffic` directly.
 
 ## Analyzer behavior (Phase 6 slice 1, view-local)
 

@@ -58,13 +58,20 @@ export type BusEventKind =
   | { ErrorStateChanged: { node: string; state: string } }
   | { FrameDropped: { sender: string; frame: WireCanFrame; fault: unknown } };
 
+/** Wire shape of BusEvent (struct): SimEventKind.BusTraffic carries the
+ *  whole event struct, whose `kind` holds the variant. */
+export interface BusEvent {
+  time_ns: number;
+  kind: BusEventKind;
+}
+
 export type SimEventKind =
   | "SimulationStarted"
   | "SimulationPaused"
   | "SimulationStopped"
   | "SimulationReset"
   | { NodeRegistered: { node: string } }
-  | { BusTraffic: BusEventKind };
+  | { BusTraffic: BusEvent };
 
 export interface SeqEvent {
   seq: number;
@@ -227,16 +234,20 @@ export interface AnalyzerRow {
   data: string;
 }
 
+/** Extract analyzer rows (TX/RX frame deliveries) from polled events.
+ *  Wire nesting is SeqEvent.kind = { BusTraffic: BusEvent } and
+ *  BusEvent.kind carries the variant — not the variant directly. */
 export function analyzerRows(events: SeqEvent[]): AnalyzerRow[] {
   const rows: AnalyzerRow[] = [];
   for (const e of events) {
     if (typeof e.kind !== "object" || !("BusTraffic" in e.kind)) continue;
-    const traffic = e.kind.BusTraffic;
-    if ("FrameTransmitted" in traffic) {
-      const { sender, frame } = traffic.FrameTransmitted;
+    const inner = (e.kind.BusTraffic as BusEvent | null)?.kind;
+    if (!inner || typeof inner !== "object") continue;
+    if ("FrameTransmitted" in inner) {
+      const { sender, frame } = inner.FrameTransmitted;
       rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "TX", node: sender, id: idToHex(frame.id), dlc: frame.dlc, data: bytesToHex(frame.data) });
-    } else if ("FrameReceived" in traffic) {
-      const { receiver, frame } = traffic.FrameReceived;
+    } else if ("FrameReceived" in inner) {
+      const { receiver, frame } = inner.FrameReceived;
       rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "RX", node: receiver, id: idToHex(frame.id), dlc: frame.dlc, data: bytesToHex(frame.data) });
     }
   }

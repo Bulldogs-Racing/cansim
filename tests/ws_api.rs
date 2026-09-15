@@ -82,6 +82,26 @@ fn ws_load_start_events_inject_reset() {
         "payload must reach the analyzer stream"
     );
 
+    // Wire-nesting contract for the analyzer (frontend analyzerRows):
+    // SeqEvent.kind = { BusTraffic: BusEvent }, BusEvent.kind = variant.
+    // A flattened shape would silently empty the analyzer table.
+    let rows = events["events"].as_array().unwrap();
+    let tx = rows.iter().find(|e| {
+        e["kind"]["BusTraffic"]["kind"]
+            .get("FrameTransmitted")
+            .is_some()
+    });
+    assert_eq!(
+        tx.unwrap()["kind"]["BusTraffic"]["kind"]["FrameTransmitted"]["sender"],
+        "engine_ecu"
+    );
+    assert!(
+        rows.iter().any(|e| e["kind"]["BusTraffic"]["kind"]
+            .get("FrameReceived")
+            .is_some()),
+        "a FrameReceived delivery must be nested the same way"
+    );
+
     // Polling with a fresh cursor yields nothing new.
     let req = format!(r#"{{"type":"GetEvents","sinceSeq":{next_seq}}}"#);
     let empty = rpc(&mut ws, &req);

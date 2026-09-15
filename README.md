@@ -4,15 +4,18 @@ CAN-first simulator: visually build networks of simulated STM32 / Arduino /
 Teensy nodes, run firmware, and debug real CAN traffic. See `PROMPT.md` for
 the full product spec and `docs/` for developer documentation.
 
-> Status: **Phases 0–2 + headless Phase 3 + headless Phase 4 + GUI slice 1**
+> Status: **Phases 0–2 + headless Phase 3 + headless Phase 4 + Phase 5
+> (serve, canvas, topology editing, scripted-traffic editor) + Phase 6
+> slice 1 (analyzer depth)**
 > — deterministic CAN core (frames, arbitration, virtual bus) with bit-level
 > codec (CRC-15, stuffing, SOF..EOF), ACK handling, TEC/REC confinement,
 > bus-off, and deterministic wire faults. `canlab simulate` runs virtual
 > nodes without a GUI and runs real STM32F103 firmware in Renode
 > (`backend: renode`, all-renode projects). `canlab serve` exposes the
 > session over WebSocket; the React frontend renders the topology canvas,
-> runs scripted traffic, and shows a live CAN Analyzer. Topology editing
-> (drag-and-drop, save) is the next slice.
+> edits it (palette, drag-and-drop, properties, save), edits scripted
+> traffic (add/update/remove), and shows a live CAN Analyzer (TX/RX filter,
+> pause/clear, CSV+JSON export).
 
 ## Quickstart
 
@@ -91,12 +94,15 @@ The GUI is a web app with three parts: a network **canvas**, run/simulation
   with the reason shown.
 - **Scripted traffic**: the panel below the canvas lists the frames Run
   transmits in order — add frames (sender, hex id, hex bytes, extended
-  flag), delete rows. Form-level hex parsing catches typos inline;
+  flag), edit rows in place (Edit loads a row into the form, Update
+  applies it), delete rows. Form-level hex parsing catches typos inline;
   server-side sender/range/DLC validation is the backstop. Removing a
   node still referenced here is refused until its rows are deleted.
 - **CAN Analyzer**: streams TX/RX frames as they happen (Time, Dir, Node,
-  ID, DLC, Data). Filter by ID or node, click a row to inspect the frame in
-  the inspector, and **Export CSV** to save the trace. The table is capped
+  ID, DLC, Data). Filter by ID/node text plus a TX/RX direction selector,
+  click a row to inspect the frame in the inspector, **Pause capture** to
+  freeze the view (resume picks up the backlog), **Clear** to drop rendered
+  rows, and **Export CSV/JSON** to save the trace. The table is capped
   at 500 rows.
 - The API repo note in-app always assumes `canlab serve` runs from the repo
   root.

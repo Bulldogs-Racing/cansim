@@ -67,7 +67,8 @@ docs/             user + developer documentation
 - [x] Phase 5 (slice 1) — serve API + canvas view + run controls + analyzer
 - [ ] Phase 4 (interactive part) — Renode supervision over WS + debugger integration
 - [x] Phase 5 (slice 2) — topology editing: palette, drag-and-drop, save
-- [x] Phase 5 (slice 3) — scripted-messages editor (add/update/remove over WS + panel)
+- [x] Phase 5 (slice 3) — scripted-messages editor (add/update/remove over WS + panel, incl. in-place edit UI)
+- [x] Phase 6 (slice 1) — analyzer depth: TX/RX filter, pause/clear capture, CSV+JSON export (view-local, no protocol change)
 - [ ] Phase 4 (WS part) — Renode job table over WS (`--max-jobs`, default 1) + trace import
 - [ ] Phase 7 — accuracy-first MCP2515 virtual execution + SPI timing
-- [ ] Phase 6+ — analyzer depth, Teensy, faults, FD, DBC
+- [ ] Phase 6+ — analyzer sorting/search, Teensy, faults, FD, DBC

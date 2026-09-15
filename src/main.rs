@@ -80,11 +80,13 @@ fn main() {
         Commands::Doctor => cmd_doctor(),
         Commands::Open { project } => {
             eprintln!(
-                "cannot open {}: the visual editor is not implemented yet (Phase 5).\n\
-                 Use `canlab simulate {}` for headless runs or `canlab validate {}` to check the project.",
+                "the desktop `open` shortcut is not implemented yet — start the visual editor manually:\n\
+                 \n\
+                 Terminal 1: cargo run -q --bin canlab -- serve --project {}\n\
+                 Terminal 2: cd frontend && npm install && npm run dev\n\
+                 \n\
+                 Then open the printed Vite URL and press Connect.",
                 project.display(),
-                project.display(),
-                project.display()
             );
             1
         }

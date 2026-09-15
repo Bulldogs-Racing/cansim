@@ -65,6 +65,17 @@ the full `CanFrame` (`id` as `{Standard: n}` / `{Extended: n}`, `dlc`,
 `data` bytes). The frontend formats IDs (`idToHex`) and timestamps
 (`fmtTimeNs`); the server never pre-formats.
 
+## Analyzer behavior (Phase 6 slice 1, view-local)
+
+Pause capture, Clear, the TX/RX direction selector, and CSV/JSON export
+are pure frontend state — no protocol change:
+
+- Pause freezes the `GetEvents` poll (cursor held); Resume re-polls from
+  the held cursor, so no frames are lost, only deferred.
+- Clear drops rendered rows; the server log is untouched.
+- `UpdateMessage` is exposed in the scripted-traffic panel as in-place
+  row editing (Edit → form → Update/Cancel).
+
 ## Scope notes
 
 - No push broadcast yet — polling is the v1 contract and is covered by

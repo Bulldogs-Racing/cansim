@@ -88,8 +88,10 @@ cd frontend && npm install && npm run dev
 ```
 
 Open the printed Vite URL, press Connect, then ▶ Run. The canvas shows the
-loaded network, the analyzer streams frames (filter, click-to-inspect, CSV
-export). Protocol details: `docs/api.md`.
+loaded network, the scripted-traffic panel edits what Run transmits
+(add/edit/delete), the analyzer streams frames (id/node filter, TX/RX
+selector, pause/clear, click-to-inspect, CSV/JSON export). Protocol
+details: `docs/api.md`.
 
 ## Scaffold and validate a project
 

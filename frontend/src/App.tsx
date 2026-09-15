@@ -59,6 +59,7 @@ const NODE_STYLE: React.CSSProperties = { background: "#111827", color: "#e5e7eb
 export default function App(): JSX.Element {
   const apiRef = useRef<CanLabApi | null>(null);
   const cursorRef = useRef(0);
+  const pausedRef = useRef(false);
   const positionsRef = useRef(new Map<string, { x: number; y: number }>());
   const [connected, setConnected] = useState(false);
   const [state, setState] = useState<EngineState>("idle");
@@ -73,6 +74,8 @@ export default function App(): JSX.Element {
   const [canvasSel, setCanvasSel] = useState<string | null>(null);
   const [rows, setRows] = useState<AnalyzerRow[]>([]);
   const [filter, setFilter] = useState("");
+  const [dirFilter, setDirFilter] = useState<"all" | "TX" | "RX">("all");
+  const [paused, setPaused] = useState(false);
   const [selected, setSelected] = useState<AnalyzerRow | null>(null);
   const [summary, setSummary] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -155,6 +158,7 @@ export default function App(): JSX.Element {
   const pollEvents = useCallback(async () => {
     const api = apiRef.current;
     if (!api?.connected) return;
+    if (pausedRef.current) return; // capture paused: freeze the cursor, resume picks up the backlog
     try {
       const reply = await api.request({ type: "GetEvents", sinceSeq: cursorRef.current });
       if (reply.type !== "Events") return;
@@ -321,9 +325,25 @@ export default function App(): JSX.Element {
 
   const visibleRows = React.useMemo(() => {
     const f = filter.trim().toLowerCase();
-    if (!f) return rows;
-    return rows.filter((r) => r.id.toLowerCase().includes(f) || r.node.toLowerCase().includes(f));
-  }, [rows, filter]);
+    return rows.filter((r) =>
+      (dirFilter === "all" || r.dir === dirFilter) &&
+      (!f || r.id.toLowerCase().includes(f) || r.node.toLowerCase().includes(f)));
+  }, [rows, filter, dirFilter]);
+
+  const toggleCapture = useCallback(() => {
+    setPaused((p) => {
+      pausedRef.current = !p;
+      return !p;
+    });
+  }, []);
+
+  const clearAnalyzer = useCallback(() => {
+    // View-local only: drops rendered rows, keeps the poll cursor. The
+    // server log is untouched; already-consumed rows won't reappear, but
+    // every new event still streams in.
+    setRows([]);
+    setSelected(null);
+  }, []);
 
   const exportCsv = useCallback(() => {
     const csv = ["seq,time_ms,dir,node,id,dlc,data", ...rows.map((r) => [r.seq, (r.timeNs / 1e6).toFixed(3), r.dir, r.node, r.id, r.dlc, `"${r.data}"`].join(","))].join("\n");
@@ -331,6 +351,16 @@ export default function App(): JSX.Element {
     const a = document.createElement("a");
     a.href = url;
     a.download = "canlab-trace.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [rows]);
+
+  const exportJson = useCallback(() => {
+    const payload = rows.map((r) => ({ seq: r.seq, timeMs: r.timeNs / 1e6, dir: r.dir, node: r.node, id: r.id, dlc: r.dlc, data: r.data }));
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "canlab-trace.json";
     a.click();
     URL.revokeObjectURL(url);
   }, [rows]);
@@ -444,15 +474,25 @@ export default function App(): JSX.Element {
           messages={messages}
           nodes={nodes}
           onAdd={(message) => editCmd("AddMessage", { type: "AddMessage", message })}
+          onUpdate={(index, message) => editCmd("UpdateMessage", { type: "UpdateMessage", index, message })}
           onRemove={(index) => editCmd("RemoveMessage", { type: "RemoveMessage", index })}
         />
       )}
 
       <section aria-label="can analyzer" style={{ background: "#0b1220", borderRadius: 12, border: "1px solid #1f2937", padding: 12 }}>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
           <h2 style={{ margin: 0, fontSize: 16 }}>CAN Analyzer</h2>
+          {paused && <span aria-label="capture paused" style={{ padding: "2px 10px", borderRadius: 999, background: "#713f12", border: "1px solid #a16207" }}>⏸ paused</span>}
           <input aria-label="filter by id or node" placeholder="filter: id or node" style={{ ...btn, cursor: "text" }} value={filter} onChange={(e) => setFilter(e.target.value)} />
+          <select aria-label="direction filter" title="TX/RX direction filter" style={btn} value={dirFilter} onChange={(e) => setDirFilter(e.target.value as "all" | "TX" | "RX")}>
+            <option value="all">TX+RX</option>
+            <option value="TX">TX only</option>
+            <option value="RX">RX only</option>
+          </select>
+          <button style={btn} onClick={toggleCapture}>{paused ? "Resume capture" : "Pause capture"}</button>
+          <button style={btn} onClick={clearAnalyzer}>Clear</button>
           <button style={btn} onClick={exportCsv}>Export CSV</button>
+          <button style={btn} onClick={exportJson}>Export JSON</button>
           <span style={{ color: "#9ca3af" }}>{visibleRows.length} row(s){rows.length >= MAX_ROWS ? ` (capped at ${MAX_ROWS})` : ""}</span>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 12 }}>
@@ -499,19 +539,38 @@ export default function App(): JSX.Element {
 /** Scripted traffic editor: what Run transmits, in order. Add form parses
  *  hex (`0x123` / `01 02`) and reports parse problems inline, before the
  *  server ever sees them; server-side validation is the backstop. */
-function MessagesPanel({ messages, nodes, onAdd, onRemove }: {
+function MessagesPanel({ messages, nodes, onAdd, onUpdate, onRemove }: {
   messages: MessageDecl[];
   nodes: ProjectNode[];
   onAdd: (message: MessageDecl) => void;
+  onUpdate: (index: number, message: MessageDecl) => void;
   onRemove: (index: number) => void;
 }): JSX.Element {
   const [sender, setSender] = useState(nodes[0]?.id ?? "");
   const [idText, setIdText] = useState("0x123");
   const [dataText, setDataText] = useState("01 02 03 04");
   const [extended, setExtended] = useState(false);
+  const [editing, setEditing] = useState<number | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const field: React.CSSProperties = { padding: 6, borderRadius: 6, border: "1px solid #374151", background: "#111827", color: "#e5e7eb" };
   const btn: React.CSSProperties = { padding: "6px 12px", borderRadius: 6, border: "1px solid #374151", background: "#1f2937", color: "#e5e7eb", cursor: "pointer" };
+
+  /** Load a row into the form for in-place editing (UpdateMessage). */
+  const beginEdit = (index: number) => {
+    const m = messages[index];
+    if (!m) return;
+    setEditing(index);
+    setSender(m.sender);
+    setIdText(`0x${m.id.toString(16).toUpperCase()}`);
+    setDataText(m.data.map((b) => b.toString(16).toUpperCase().padStart(2, "0")).join(" "));
+    setExtended(m.extended ?? false);
+    setFormError(null);
+  };
+
+  const cancelEdit = () => {
+    setEditing(null);
+    setFormError(null);
+  };
 
   const submit = () => {
     setFormError(null);
@@ -543,12 +602,23 @@ function MessagesPanel({ messages, nodes, onAdd, onRemove }: {
       setFormError("Classical CAN carries at most 8 data bytes");
       return;
     }
-    onAdd({ sender, id, data, extended });
+    const decl = { sender, id, data, extended };
+    if (editing !== null) {
+      onUpdate(editing, decl);
+      setEditing(null);
+    } else {
+      onAdd(decl);
+    }
   };
 
   return (
     <section aria-label="scripted messages" style={{ background: "#0b1220", borderRadius: 12, border: "1px solid #1f2937", padding: 12, marginBottom: 12 }}>
       <h2 style={{ margin: "0 0 8px", fontSize: 16 }}>Scripted traffic ({messages.length})</h2>
+      {editing !== null && (
+        <p style={{ margin: "0 0 8px", color: "#fbbf24", fontSize: 13 }}>
+          Editing row {editing} — Update applies it, Cancel keeps the list unchanged.
+        </p>
+      )}
       <p style={{ margin: "0 0 8px", color: "#9ca3af", fontSize: 13 }}>
         Frames Run transmits in order. Deleting a row shifts later indices (see bugs.md); the list refreshes after every op.
       </p>
@@ -556,18 +626,19 @@ function MessagesPanel({ messages, nodes, onAdd, onRemove }: {
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, marginBottom: 8 }}>
           <thead>
             <tr style={{ textAlign: "left", color: "#9ca3af" }}>
-              <th>#</th><th>Sender</th><th>ID</th><th>DLC</th><th>Data</th><th></th>
+              <th>#</th><th>Sender</th><th>ID</th><th>DLC</th><th>Data</th><th></th><th></th>
             </tr>
           </thead>
           <tbody>
             {messages.map((m, i) => (
-              <tr key={i}>
+              <tr key={i} style={{ background: editing === i ? "#1e3a8a" : "transparent" }}>
                 <td>{i}</td>
                 <td>{m.sender}</td>
                 <td style={{ fontFamily: "monospace" }}>0x{m.id.toString(16).toUpperCase()}{m.extended ? " (ext)" : ""}</td>
                 <td>{m.data.length}</td>
                 <td style={{ fontFamily: "monospace" }}>{m.data.map((b) => b.toString(16).toUpperCase().padStart(2, "0")).join(" ") || "(empty)"}</td>
-                <td><button style={btn} onClick={() => onRemove(i)}>Delete</button></td>
+                <td><button style={btn} onClick={() => beginEdit(i)}>Edit</button></td>
+                <td><button style={btn} onClick={() => { if (editing === i) setEditing(null); onRemove(i); }}>Delete</button></td>
               </tr>
             ))}
           </tbody>
@@ -583,7 +654,8 @@ function MessagesPanel({ messages, nodes, onAdd, onRemove }: {
         <label style={{ fontSize: 13 }}>
           <input type="checkbox" checked={extended} onChange={(e) => setExtended(e.target.checked)} /> extended
         </label>
-        <button style={btn} onClick={submit}>＋ Add frame</button>
+        <button style={btn} onClick={submit}>{editing !== null ? "Update frame" : "＋ Add frame"}</button>
+        {editing !== null && <button style={btn} onClick={cancelEdit}>Cancel</button>}
       </div>
       {formError && <p role="alert" style={{ color: "#fca5a5", margin: "8px 0 0" }}>{formError}</p>}
     </section>

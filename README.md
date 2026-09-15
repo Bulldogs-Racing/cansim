@@ -33,6 +33,7 @@ More: `docs/getting-started.md`, `docs/architecture.md`, `docs/can-model.md`.
 canlab new my-project                  # scaffold portable project dir
 canlab simulate project.canlab         # headless run (virtual or Renode)
 canlab simulate renode.canlab --run-secs 30 --export-json events.json
+canlab replay project.canlab events.json  # deterministically replay a recorded trace
 canlab serve --project project.canlab [--max-jobs 2]  # local WebSocket API for the GUI
 canlab validate project.canlab         # schema + safety checks
 canlab doctor                          # Renode / dotnet / toolchains / SocketCAN

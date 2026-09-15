@@ -131,6 +131,18 @@ cargo run -q --bin canlab -- validate my-project/project.canlab
 cargo run -q --bin canlab -- doctor
 ```
 
+## Record and replay a trace
+
+```bash
+cargo run -q --bin canlab -- simulate examples/two_nodes.canlab.yaml --export-json trace.json
+cargo run -q --bin canlab -- replay examples/two_nodes.canlab.yaml trace.json
+```
+
+Replay re-transmits every recorded TX frame in order through a fresh
+engine on a virtual project — same timeline, same timestamps,
+bit-identical event log. Useful for debugging: capture once, re-run the
+exact traffic while you inspect it.
+
 ## Run the tests
 
 ```bash

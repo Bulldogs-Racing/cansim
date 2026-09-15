@@ -2,6 +2,8 @@
 //!
 //! - `canlab new <name>` — scaffold a portable project directory (§48)
 //! - `canlab simulate <project>` — headless deterministic run, no GUI (§45)
+//! - `canlab replay <project> <trace.json>` — deterministically replay a
+//!   recorded event log (from `simulate --export-json`), no GUI (§54)
 //! - `canlab validate <project>` — schema + safety checks (§21)
 //! - `canlab serve [--port N] [--project p]` — local WebSocket API for the
 //!   visual editor (§4); the GUI drives this, never the engine directly
@@ -13,6 +15,7 @@ use cansimcan::can::id::CanId;
 use cansimcan::can::timing::NS_PER_MS;
 use cansimcan::project::{validate_project, Project};
 use cansimcan::simulation::engine::Engine;
+use cansimcan::simulation::event::{extract_transmissions, SimEvent};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
@@ -49,6 +52,16 @@ enum Commands {
     },
     /// Validate a project file without simulating.
     Validate { project: PathBuf },
+    /// Replay a recorded event-log trace deterministically (no GUI).
+    Replay {
+        /// Project file (routing: buses + nodes for the recorded senders).
+        project: PathBuf,
+        /// Event-log JSON from `canlab simulate --export-json`.
+        trace: PathBuf,
+        /// Write the replayed event log as JSON to this path.
+        #[arg(long)]
+        export_json: Option<PathBuf>,
+    },
     /// Serve the local WebSocket API for the visual editor.
     Serve {
         /// Loopback port to listen on.
@@ -77,6 +90,11 @@ fn main() {
             run_secs,
         } => cmd_simulate(&project, export_json.as_deref(), run_secs),
         Commands::Validate { project } => cmd_validate(&project),
+        Commands::Replay {
+            project,
+            trace,
+            export_json,
+        } => cmd_replay(&project, &trace, export_json.as_deref()),
         Commands::Serve {
             port,
             project,
@@ -237,6 +255,91 @@ fn cmd_simulate(path: &Path, export_json: Option<&Path>, run_secs: u64) -> i32 {
 }
 
 fn cmd_simulate_virtual(proj: &Project, export_json: Option<&Path>) -> i32 {
+    print_run_header(proj);
+
+    // Scripted traffic, or the canonical §74 demo frame when the project
+    // declares no `messages:` (id ranges pre-validated, so unwraps are safe).
+    let script: Vec<(String, CanFrame)> = if proj.messages.is_empty() {
+        vec![(
+            proj.nodes[0].id.clone(),
+            CanFrame::new(
+                CanId::new_standard(0x123).unwrap(),
+                &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+            )
+            .unwrap(),
+        )]
+    } else {
+        proj.messages
+            .iter()
+            .map(|m| {
+                let id = if m.extended {
+                    CanId::new_extended(m.id).unwrap()
+                } else {
+                    CanId::new_standard(m.id as u16).unwrap()
+                };
+                (m.sender.clone(), CanFrame::new(id, &m.data).unwrap())
+            })
+            .collect()
+    };
+    run_virtual_timeline(proj, &script, "transmitted", export_json)
+}
+
+/// Replay a recorded event-log trace deterministically (§54, headless
+/// slice): every transmitted frame in the trace, in order, through a fresh
+/// engine on the given (virtual-only) project. The trace format is the
+/// `--export-json` event log; RX deliveries and lifecycle markers are
+/// derived, not replayed.
+fn cmd_replay(project: &Path, trace: &Path, export_json: Option<&Path>) -> i32 {
+    let proj = match load_and_validate(project) {
+        Some(p) => p,
+        None => return 1,
+    };
+    if proj.nodes.iter().any(|n| n.backend != "virtual") {
+        eprintln!(
+            "cannot replay: project {} uses non-virtual backends.\n\
+             Replay replays recorded virtual traffic deterministically.\n\
+             Fix: replay a virtual project, or run renode firmware live: canlab simulate {}",
+            project.display(),
+            project.display()
+        );
+        return 1;
+    }
+    let text = match std::fs::read_to_string(trace) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("failed to read trace {}: {e}", trace.display());
+            return 1;
+        }
+    };
+    let events: Vec<SimEvent> = match serde_json::from_str(&text) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!(
+                "failed to parse trace {}: expected event-log JSON from `canlab simulate --export-json` ({e})",
+                trace.display()
+            );
+            return 1;
+        }
+    };
+    let script = extract_transmissions(&events);
+    if script.is_empty() {
+        println!(
+            "Trace {} holds no transmitted frames — nothing to replay.",
+            trace.display()
+        );
+        return 0;
+    }
+    println!(
+        "Replaying {} frame(s) from {}...",
+        script.len(),
+        trace.display()
+    );
+    println!();
+    print_run_header(&proj);
+    run_virtual_timeline(&proj, &script, "replayed", export_json)
+}
+
+fn print_run_header(proj: &Project) {
     println!("Starting CanLab...");
     println!();
     println!("Bus:");
@@ -252,7 +355,17 @@ fn cmd_simulate_virtual(proj: &Project, export_json: Option<&Path>) -> i32 {
     println!();
     println!("Simulation started.");
     println!();
+}
 
+/// Shared headless timeline: fresh engine, all nodes on the first bus
+/// (multi-bus routing deferred, §72 — same note as before), one
+/// §75-style TX/RX line per frame, deterministic timestamps.
+fn run_virtual_timeline(
+    proj: &Project,
+    script: &[(String, CanFrame)],
+    verb: &str,
+    export_json: Option<&Path>,
+) -> i32 {
     let mut engine = Engine::new();
     for b in &proj.buses {
         if let Err(e) = engine.add_bus(CanBusConfig::new(b.id.clone(), b.bitrate).unwrap()) {
@@ -282,14 +395,7 @@ fn cmd_simulate_virtual(proj: &Project, export_json: Option<&Path>) -> i32 {
     let mut tx_count = 0u64;
     let mut rx_count = 0u64;
 
-    if proj.messages.is_empty() {
-        // Default demo: first node sends the canonical §74 frame.
-        let sender = &proj.nodes[0].id;
-        let frame = CanFrame::new(
-            CanId::new_standard(0x123).unwrap(),
-            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
-        )
-        .unwrap();
+    for (sender, frame) in script {
         let t = engine.now();
         match engine.transmit(&bus, sender, frame.clone()) {
             Ok(out) => {
@@ -311,50 +417,15 @@ fn cmd_simulate_virtual(proj: &Project, export_json: Option<&Path>) -> i32 {
                 rx_count += out.receivers.len() as u64;
             }
             Err(e) => {
-                eprintln!("transmission failed: {e}");
+                eprintln!("transmission from {sender} failed: {e}");
                 return 1;
-            }
-        }
-    } else {
-        for m in &proj.messages {
-            let id = if m.extended {
-                CanId::new_extended(m.id).unwrap()
-            } else {
-                CanId::new_standard(m.id as u16).unwrap()
-            };
-            let frame = CanFrame::new(id, &m.data).unwrap();
-            let t = engine.now();
-            match engine.transmit(&bus, &m.sender, frame.clone()) {
-                Ok(out) => {
-                    println!(
-                        "[{}] {} TX {} [{}]",
-                        fmt_time(t),
-                        m.sender,
-                        frame.id,
-                        frame.data_hex()
-                    );
-                    for rx in &out.receivers {
-                        println!(
-                            "[{}] {rx} RX {} [{}]",
-                            fmt_time(t),
-                            frame.id,
-                            frame.data_hex()
-                        );
-                    }
-                    tx_count += 1;
-                    rx_count += out.receivers.len() as u64;
-                }
-                Err(e) => {
-                    eprintln!("transmission from {} failed: {e}", m.sender);
-                    return 1;
-                }
             }
         }
     }
 
     engine.stop();
     println!();
-    println!("Simulation finished: {tx_count} frame(s) transmitted, {rx_count} reception(s).");
+    println!("Simulation finished: {tx_count} frame(s) {verb}, {rx_count} reception(s).");
 
     if let Some(out_path) = export_json {
         match serde_json::to_string_pretty(engine.events()) {

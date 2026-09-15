@@ -9,9 +9,11 @@
 //! Rules (explicit, §48 + §21):
 //!
 //! - The project must validate first; invalid projects never package.
-//! - Every referenced firmware file must *exist* (a mere validation
-//!   warning elsewhere): a package with dangling references is a broken
-//!   package, so missing firmware is a hard error naming the node.
+//! - A firmware file missing for a node that actually executes it
+//!   (`backend: renode`) is a hard error naming the node: such a package
+//!   could never run. Virtual nodes merely reference firmware, so a
+//!   missing file is skipped with a printed warning — matching
+//!   `validate`/`simulate`, which treat it the same way.
 //! - Nothing executes, nothing is transformed: byte copies plus the
 //!   project file rewritten from the parsed model (normalizes formatting,
 //!   never content).
@@ -68,11 +70,12 @@ pub fn package_project(project_path: &Path, out_dir: &Path) -> Result<PackageRep
     }
 
     let mut files = Vec::new();
-    // Pre-check ALL firmware before copying anything, so a missing file
-    // fails with no partial output left behind.
+    // Pre-check firmware for nodes that execute it, before copying
+    // anything, so a fatal miss leaves no partial output behind. Virtual
+    // nodes only reference firmware — skip those files with a warning.
     for n in &proj.nodes {
         if let Some(fw) = &n.firmware {
-            if !base.join(fw).is_file() {
+            if n.backend != "virtual" && !base.join(fw).is_file() {
                 return Err(PackageError::MissingFirmware {
                     node: n.id.clone(),
                     firmware: fw.clone(),
@@ -83,6 +86,13 @@ pub fn package_project(project_path: &Path, out_dir: &Path) -> Result<PackageRep
     for n in &proj.nodes {
         if let Some(fw) = &n.firmware {
             let rel = clean_relative(fw);
+            if !base.join(&rel).is_file() {
+                eprintln!(
+                    "warning: node \"{}\" references missing firmware \"{fw}\" — skipped (virtual nodes never execute it)",
+                    n.id
+                );
+                continue;
+            }
             let dst = out_dir.join(&rel);
             copy_file(&base.join(&rel), &dst)?;
             files.push(rel.display().to_string());
@@ -214,10 +224,32 @@ mod tests {
     }
 
     #[test]
+    fn virtual_nodes_skip_missing_firmware_renode_nodes_fail() {
+        let dir = tmp("lenient");
+        let src = project(&dir.join("src"));
+        // Virtual nodes merely reference firmware: the dangling file is
+        // skipped with success, not failure.
+        std::fs::remove_file(dir.join("src/firmware/ecu.elf")).unwrap();
+        let rep = package_project(&src, &dir.join("pkg")).unwrap();
+        assert_eq!(rep.files, vec!["dbc/vehicle.dbc", "project.canlab"]);
+        assert!(!dir.join("pkg").join("firmware/ecu.elf").exists());
+        // The packaged tree still validates from its new home.
+        let back = Project::load_from_file(&dir.join("pkg/project.canlab")).unwrap();
+        assert!(validate_project(&back, &dir.join("pkg")).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn refuses_missing_firmware_invalid_and_existing_out() {
         let dir = tmp("rej");
         let src = project(&dir.join("src"));
-        // Dangling firmware (warning at validate) is a hard error here.
+        // A renode node truly executes firmware: dangling file is fatal,
+        // with no partial output left behind.
+        let renode_yaml = std::fs::read_to_string(&src).unwrap().replace(
+            "- {id: n1, device: stm32f103, backend: virtual, firmware: ./firmware/ecu.elf, can: {bus: b}}",
+            "- {id: n1, device: stm32f103, backend: renode, firmware: ./firmware/ecu.elf, can: {bus: b}}",
+        );
+        std::fs::write(&src, renode_yaml).unwrap();
         std::fs::remove_file(dir.join("src/firmware/ecu.elf")).unwrap();
         let err = package_project(&src, &dir.join("pkg")).unwrap_err();
         assert!(matches!(err, PackageError::MissingFirmware { .. }), "{err}");

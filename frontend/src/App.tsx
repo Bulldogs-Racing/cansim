@@ -534,7 +534,7 @@ export default function App(): JSX.Element {
       </header>
 
       {error && (
-        <div role="alert" style={{ background: "#7f1d1d", border: "1px solid #ef4444", borderRadius: 8, padding: 10, marginBottom: 12, whiteSpace: "pre-wrap" }}>
+        <div role="alert" style={{ position: "sticky", top: 0, zIndex: 10, background: "#7f1d1d", border: "1px solid #ef4444", borderRadius: 8, padding: 10, marginBottom: 12, whiteSpace: "pre-wrap", maxHeight: "30vh", overflow: "auto" }}>
           {error}
         </div>
       )}
@@ -603,7 +603,7 @@ export default function App(): JSX.Element {
 
       {connected && flowNodes.length > 0 && (
         <MessagesPanel
-          key={nodes.map((n) => n.id).join(",")}
+          key={`messages:${nodes.map((n) => n.id).join(",")}`}
           messages={messages}
           nodes={nodes}
           onAdd={(message) => editCmd("AddMessage", { type: "AddMessage", message })}
@@ -668,7 +668,7 @@ export default function App(): JSX.Element {
 
       {connected && nodes.length > 0 && (
         <FaultPanel
-          key={nodes.map((n) => n.id).join(",")}
+          key={`fault:${nodes.map((n) => n.id).join(",")}`}
           nodes={nodes}
           onFault={(sender, id, data, extended, fault) =>
             runCmd("InjectFault", { type: "InjectFault", sender, id, data, extended, fault })}

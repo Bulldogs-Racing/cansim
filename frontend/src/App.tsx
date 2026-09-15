@@ -17,8 +17,10 @@ import {
   EngineState,
   fmtTimeNs,
   KNOWN_DEVICES,
+  matchIdFilter,
   MessageDecl,
   NodeDecl,
+  parseIdFilter,
   ProjectBus,
   ProjectNode,
   RenodeJob,
@@ -76,6 +78,8 @@ export default function App(): JSX.Element {
   const [canvasSel, setCanvasSel] = useState<string | null>(null);
   const [rows, setRows] = useState<AnalyzerRow[]>([]);
   const [filter, setFilter] = useState("");
+  const [idFilterText, setIdFilterText] = useState("");
+  const [newestFirst, setNewestFirst] = useState(false);
   const [dirFilter, setDirFilter] = useState<"all" | "TX" | "RX" | "DROP">("all");
   const [paused, setPaused] = useState(false);
   const [renodePath, setRenodePath] = useState("firmware/tests/stm32_can/two_nodes.canlab.yaml");
@@ -407,10 +411,14 @@ export default function App(): JSX.Element {
 
   const visibleRows = React.useMemo(() => {
     const f = filter.trim().toLowerCase();
-    return rows.filter((r) =>
+    const spec = parseIdFilter(idFilterText);
+    const kept = rows.filter((r) =>
       (dirFilter === "all" || r.dir === dirFilter) &&
-      (!f || r.id.toLowerCase().includes(f) || r.node.toLowerCase().includes(f)));
-  }, [rows, filter, dirFilter]);
+      (!f || r.id.toLowerCase().includes(f) || r.node.toLowerCase().includes(f)) &&
+      matchIdFilter(Number(r.id), spec));
+    return newestFirst ? [...kept].reverse() : kept;
+  }, [rows, filter, idFilterText, dirFilter, newestFirst]);
+  const idFilterSpec = React.useMemo(() => parseIdFilter(idFilterText), [idFilterText]);
 
   const toggleCapture = useCallback(() => {
     setPaused((p) => {
@@ -617,6 +625,8 @@ export default function App(): JSX.Element {
           <h2 style={{ margin: 0, fontSize: 16 }}>CAN Analyzer</h2>
           {paused && <span aria-label="capture paused" style={{ padding: "2px 10px", borderRadius: 999, background: "#713f12", border: "1px solid #a16207" }}>⏸ paused</span>}
           <input aria-label="filter by id or node" placeholder="filter: id or node" style={{ ...btn, cursor: "text" }} value={filter} onChange={(e) => setFilter(e.target.value)} />
+          <input aria-label="id filter" title="exact (0x123), range (0x100-0x2FF), or id/mask (0x120/0x7F0)" placeholder="id: 0x123, range, mask" style={{ ...btn, cursor: "text", width: 180 }} value={idFilterText} onChange={(e) => setIdFilterText(e.target.value)} />
+          <button style={btn} onClick={() => setNewestFirst((v) => !v)}>{newestFirst ? "⇅ Oldest first" : "⇅ Newest first"}</button>
           <select aria-label="direction filter" title="TX/RX/DROP direction filter" style={btn} value={dirFilter} onChange={(e) => setDirFilter(e.target.value as "all" | "TX" | "RX" | "DROP")}>
             <option value="all">All</option>
             <option value="TX">TX only</option>
@@ -628,6 +638,7 @@ export default function App(): JSX.Element {
           <button style={btn} onClick={exportCsv}>Export CSV</button>
           <button style={btn} onClick={exportJson}>Export JSON</button>
           <span style={{ color: "#9ca3af" }}>{visibleRows.length} row(s){rows.length >= MAX_ROWS ? ` (capped at ${MAX_ROWS})` : ""}</span>
+          {idFilterSpec.kind === "invalid" && <span role="alert" style={{ color: "#fca5a5" }}>{idFilterSpec.message}</span>}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 12 }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>

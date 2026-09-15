@@ -222,6 +222,52 @@ export function idToHex(id: WireCanId): string {
   return `0x${id.Extended.toString(16).toUpperCase()}`;
 }
 
+/** Structured ID filter (§31 subset): exact, inclusive range, or mask.
+ *  Pure (no DOM) so it stays unit-testable outside the browser. */
+export type IdFilterSpec =
+  | { kind: "all" }
+  | { kind: "exact"; id: number }
+  | { kind: "range"; lo: number; hi: number }
+  | { kind: "mask"; id: number; mask: number }
+  | { kind: "invalid"; message: string };
+
+function parseHexNum(text: string): number | null {
+  const t = text.trim().toLowerCase().startsWith("0x") ? text.trim() : `0x${text.trim()}`;
+  const n = Number(t);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+export function parseIdFilter(text: string): IdFilterSpec {
+  const t = text.trim();
+  if (t === "") return { kind: "all" };
+  if (t.includes("-")) {
+    const [a, b] = t.split("-", 2).map((s) => parseHexNum(s));
+    if (a === null || b === null) return { kind: "invalid", message: `"${text}" is not a range (e.g. 0x100-0x2FF)` };
+    if (a > b) return { kind: "invalid", message: `range start 0x${a.toString(16).toUpperCase()} exceeds end 0x${b.toString(16).toUpperCase()}` };
+    return { kind: "range", lo: a, hi: b };
+  }
+  if (t.includes("/")) {
+    const [a, b] = t.split("/", 2).map((s) => parseHexNum(s));
+    if (a === null || b === null) return { kind: "invalid", message: `"${text}" is not an id/mask pair (e.g. 0x120/0x7F0)` };
+    return { kind: "mask", id: a, mask: b };
+  }
+  const id = parseHexNum(t);
+  if (id === null) return { kind: "invalid", message: `"${text}" is not a hex id, range, or id/mask pair` };
+  return { kind: "exact", id };
+}
+
+/** Numeric frame id (from an "0x123" row id) against a parsed spec.
+ *  Invalid specs match nothing — the UI shows the parse error instead. */
+export function matchIdFilter(idNum: number, spec: IdFilterSpec): boolean {
+  switch (spec.kind) {
+    case "all": return true;
+    case "exact": return idNum === spec.id;
+    case "range": return idNum >= spec.lo && idNum <= spec.hi;
+    case "mask": return (idNum & spec.mask) === (spec.id & spec.mask);
+    case "invalid": return false;
+  }
+}
+
 export function bytesToHex(data: number[]): string {
   return data.map((b) => b.toString(16).toUpperCase().padStart(2, "0")).join(" ");
 }

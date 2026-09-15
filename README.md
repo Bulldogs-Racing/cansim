@@ -101,11 +101,12 @@ The GUI is a web app with three parts: a network **canvas**, run/simulation
   server-side sender/range/DLC validation is the backstop. Removing a
   node still referenced here is refused until its rows are deleted.
 - **CAN Analyzer**: streams TX/RX frames as they happen (Time, Dir, Node,
-  ID, DLC, Data). Filter by ID/node text plus a TX/RX direction selector,
-  click a row to inspect the frame in the inspector, **Pause capture** to
-  freeze the view (resume picks up the backlog), **Clear** to drop rendered
-  rows, and **Export CSV/JSON** to save the trace. The table is capped
-  at 500 rows.
+  ID, DLC, Data). Filter by ID/node text, by structured ID (exact
+  `0x123`, range `0x100-0x2FF`, or id/mask `0x120/0x7F0`) plus a TX/RX/DROP
+  direction selector, sort newest/oldest, click a row to inspect the frame
+  in the inspector, **Pause capture** to freeze the view (resume picks up
+  the backlog), **Clear** to drop rendered rows, and **Export CSV/JSON**
+  to save the trace. The table is capped at 500 rows.
 - **Renode firmware runs**: start real STM32F103 firmware in the
   background (project path + run budget), watch jobs poll to done, then
   **Import trace** to replay observed firmware frames into the analyzer.

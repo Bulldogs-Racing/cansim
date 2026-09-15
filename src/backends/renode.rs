@@ -38,6 +38,11 @@ pub const RENODE_SUPPORTED_DEVICE: &str = "stm32f103";
 
 pub struct RenodeBackend {
     pub binary: PathBuf,
+    /// Resolved `dotnet` host the Renode launcher needs. Carried into the
+    /// emulator child's PATH at spawn: discovering dotnet via `.tools/`
+    /// must imply Renode can use it, otherwise `discover()` passes and the
+    /// child dies with "dotnet not found".
+    pub dotnet: PathBuf,
 }
 
 impl RenodeBackend {
@@ -45,8 +50,8 @@ impl RenodeBackend {
     /// explain how to install whichever is missing (§68).
     pub fn discover() -> Result<Self, BackendError> {
         let binary = resolve_binary()?;
-        check_dotnet_runtime()?;
-        Ok(RenodeBackend { binary })
+        let dotnet = resolve_dotnet()?;
+        Ok(RenodeBackend { binary, dotnet })
     }
 
     /// Check one node up front: supported device + present, ELF firmware.
@@ -109,6 +114,7 @@ impl McuBackend for RenodeBackend {
 
         let output = run_supervised(
             &self.binary,
+            &self.dotnet,
             &["--disable-xwt", "--port", "0"],
             &[format!("include @{}", resc_path.display()), "start".into()],
             Duration::from_secs(spec.run_secs.max(1)),
@@ -181,7 +187,12 @@ fn find_dotnet() -> Option<PathBuf> {
 /// absent, fails, or reports no usable runtime.
 pub fn dotnet_runtime_version() -> Option<String> {
     let dotnet = find_dotnet()?;
-    let out = Command::new(&dotnet).arg("--list-runtimes").output().ok()?;
+    runtime_version_of(&dotnet)
+}
+
+/// Newest `Microsoft.NETCore.App` version one `dotnet` host reports.
+fn runtime_version_of(dotnet: &Path) -> Option<String> {
+    let out = Command::new(dotnet).arg("--list-runtimes").output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -209,12 +220,11 @@ fn parse_runtime_version(output: &str) -> Option<String> {
 /// Renode 1.17 targets `net8.0` with `rollForward: Major`, so any runtime
 /// major >= 8 runs it. Older (or absent) runtimes fail here with a fix,
 /// not mid-run inside the emulator child.
-fn check_dotnet_runtime() -> Result<(), BackendError> {
-    let Some(version) = dotnet_runtime_version() else {
-        return Err(BackendError::DotnetMissing);
-    };
+fn resolve_dotnet() -> Result<PathBuf, BackendError> {
+    let dotnet = find_dotnet().ok_or(BackendError::DotnetMissing)?;
+    let version = runtime_version_of(&dotnet).ok_or(BackendError::DotnetMissing)?;
     if runtime_usable(&version) {
-        Ok(())
+        Ok(dotnet)
     } else {
         Err(BackendError::DotnetTooOld { found: version })
     }
@@ -347,6 +357,18 @@ pub fn generate_resc(spec: &RenodeRunSpec) -> String {
     s
 }
 
+/// PATH for the emulator child: the resolved dotnet host's directory first,
+/// then the inherited PATH. Pure over `current` (no env reads) so unit
+/// tests cover it without mutating the process environment.
+fn child_path(dotnet: &Path, current: Option<&std::ffi::OsStr>) -> Option<std::ffi::OsString> {
+    let dir = dotnet.parent()?;
+    let mut paths = vec![dir.as_os_str().to_owned()];
+    if let Some(path) = current {
+        paths.extend(std::env::split_paths(path).map(|p| p.into_os_string()));
+    }
+    std::env::join_paths(paths).ok()
+}
+
 /// Unique scratch dir per run (no hard-coded temp paths, §18).
 fn create_workdir() -> std::io::Result<PathBuf> {
     let dir = std::env::temp_dir().join(format!(
@@ -384,6 +406,7 @@ fn next_nonce() -> u64 {
 ///    briefly, then fall back to kill. The child is always reaped.
 fn run_supervised(
     binary: &Path,
+    dotnet: &Path,
     args: &[&str],
     extra_e: &[String],
     budget: Duration,
@@ -394,6 +417,12 @@ fn run_supervised(
         cmd.arg("-e").arg(e);
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // The Renode launcher execs `dotnet` itself: give the child the
+    // resolved host's directory first on PATH, so repo-local runtimes work
+    // without the user exporting anything.
+    if let Some(path) = child_path(dotnet, std::env::var_os("PATH").as_deref()) {
+        cmd.env("PATH", path);
+    }
     // Run from the Renode install dir so `@platforms/...` resolves, exactly
     // like the documented manual runs.
     if let Some(dir) = binary.parent() {
@@ -744,6 +773,21 @@ mod tests {
         assert_ne!(a, b);
         std::fs::remove_dir_all(&a).unwrap();
         std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    #[test]
+    fn child_path_puts_dotnet_first() {
+        let dotnet = PathBuf::from("/repo/.tools/dotnet/dotnet");
+        let joined = child_path(&dotnet, Some(std::ffi::OsStr::new("/usr/bin:/bin"))).unwrap();
+        let mut parts = std::env::split_paths(&joined);
+        assert_eq!(
+            parts.next().as_deref(),
+            Some(Path::new("/repo/.tools/dotnet"))
+        );
+        assert_eq!(parts.next().as_deref(), Some(Path::new("/usr/bin")));
+        // No inherited PATH: the host dir alone still works.
+        let alone = child_path(&dotnet, None).unwrap();
+        assert_eq!(alone, "/repo/.tools/dotnet");
     }
 
     fn write_elf(dir: &Path, name: &str) -> PathBuf {

@@ -29,11 +29,12 @@ nothing is installed system-wide:
   ```bash
   curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
   bash /tmp/dotnet-install.sh --channel 8.0 --runtime dotnet --install-dir ./.tools/dotnet --no-path
-  export PATH="$PWD/.tools/dotnet:$PATH"
   ```
-  `canlab doctor` reports the runtime version; `RenodeBackend::discover`
-  fails fast with install instructions when it is missing (instead of a
-  cryptic mid-run emulator exit).
+  `canlab` finds `.tools/dotnet` on its own and passes it to the emulator
+  child, so no `export PATH` is needed for `simulate` / `serve` / `doctor`
+  (only for running `renode` by hand). `canlab doctor` reports the runtime
+  version; `RenodeBackend::discover` fails fast with install instructions
+  when it is missing (instead of a cryptic mid-run emulator exit).
 - **ARM toolchain**: unpack an `aarch64`-hosted `arm-none-eabi` tarball
   from ARM's GNU toolchain downloads and link it as `.tools/arm-gcc`
   (14.2.rel1 verified: `arm-none-eabi-gcc -mcpu=cortex-m3` emits ARM ELF32).

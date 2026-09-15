@@ -459,6 +459,41 @@ impl Session {
         })
     }
 
+    /// Replay externally observed frames (e.g. a finished Renode job's TX
+    /// frames) through the session engine at the current engine time.
+    /// Semantically a batch [`Session::inject`]: one uniform event stream
+    /// for the analyzer/export consumers, deterministic given the log
+    /// prefix. All senders resolve first — an unknown sender fails the
+    /// whole import with no partial application.
+    pub fn import_frames(
+        &mut self,
+        frames: &[(String, CanFrame)],
+    ) -> Result<RunSummary, SessionError> {
+        // Resolve everything before transmitting anything.
+        let plan: Vec<(String, String, CanFrame)> = {
+            let loaded = self.loaded.as_ref().ok_or(SessionError::NoProject)?;
+            let mut plan = Vec::new();
+            for (sender, frame) in frames {
+                let bus = loaded.node_bus.get(sender).cloned().ok_or_else(|| {
+                    SessionError::UnknownNode(sender.clone(), known_nodes(loaded))
+                })?;
+                plan.push((bus, sender.clone(), frame.clone()));
+            }
+            plan
+        };
+        let mut transmitted = 0u64;
+        let mut received = 0u64;
+        for (bus, sender, frame) in plan {
+            let out = self.engine.transmit(&bus, &sender, frame)?;
+            transmitted += 1;
+            received += out.receivers.len() as u64;
+        }
+        Ok(RunSummary {
+            transmitted,
+            received,
+        })
+    }
+
     /// Send one ad-hoc frame now (future "inject" button / fault tooling).
     pub fn inject(
         &mut self,
@@ -985,6 +1020,71 @@ messages:
             s.load(&renode),
             Err(SessionError::RenodeOverApi { .. })
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_frames_replays_like_batch_inject() {
+        use crate::can::bus::{BusEvent, BusEventKind};
+        use crate::can::frame::CanFrame;
+        use crate::can::id::CanId;
+        use crate::simulation::event::SimEventKind;
+
+        let frame = || CanFrame::new(CanId::new_standard(0x123).unwrap(), &[0x01, 0x02]).unwrap();
+        // No project: nothing to route through.
+        let mut s = Session::new();
+        assert!(matches!(
+            s.import_frames(&[("engine_ecu".into(), frame())]),
+            Err(SessionError::NoProject)
+        ));
+
+        let dir = tmpdir("import");
+        let path = write_project(&dir, "p.canlab", TWO_NODES);
+        s.load(&path).unwrap();
+        let before = s.events().len();
+        let summary = s.import_frames(&[("engine_ecu".into(), frame())]).unwrap();
+        assert_eq!(
+            summary,
+            RunSummary {
+                transmitted: 1,
+                received: 1
+            }
+        );
+        // Exactly one TX and one RX delivery in the appended traffic.
+        let fresh = &s.events()[before..];
+        let tx = fresh
+            .iter()
+            .filter(|e| {
+                matches!(
+                    &e.kind,
+                    SimEventKind::BusTraffic(BusEvent {
+                        kind: BusEventKind::FrameTransmitted { .. },
+                        ..
+                    })
+                )
+            })
+            .count();
+        let rx = fresh
+            .iter()
+            .filter(|e| {
+                matches!(
+                    &e.kind,
+                    SimEventKind::BusTraffic(BusEvent {
+                        kind: BusEventKind::FrameReceived { .. },
+                        ..
+                    })
+                )
+            })
+            .count();
+        assert_eq!((tx, rx), (1, 1));
+        let after_ok = s.events().len();
+
+        // Unknown sender fails the whole import with no partial application.
+        let err = s
+            .import_frames(&[("engine_ecu".into(), frame()), ("ghost".into(), frame())])
+            .unwrap_err();
+        assert!(matches!(err, SessionError::UnknownNode(_, _)));
+        assert_eq!(s.events().len(), after_ok);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

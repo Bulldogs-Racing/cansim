@@ -4,17 +4,18 @@ CAN-first simulator: visually build networks of simulated STM32 / Arduino /
 Teensy nodes, run firmware, and debug real CAN traffic. See `PROMPT.md` for
 the full product spec and `docs/` for developer documentation.
 
-> Status: **Phases 0–2 + headless Phase 3 + headless Phase 4 + Phase 5
-> (serve, canvas, topology editing, scripted-traffic editor) + Phase 6
-> slice 1 (analyzer depth)**
+> Status: **Phases 0–2 + headless Phase 3 + Phase 4 (headless + WS job
+> table) + Phase 5 (serve, canvas, topology editing, scripted-traffic
+> editor) + Phase 6 slice 1 (analyzer depth)**
 > — deterministic CAN core (frames, arbitration, virtual bus) with bit-level
 > codec (CRC-15, stuffing, SOF..EOF), ACK handling, TEC/REC confinement,
 > bus-off, and deterministic wire faults. `canlab simulate` runs virtual
 > nodes without a GUI and runs real STM32F103 firmware in Renode
 > (`backend: renode`, all-renode projects). `canlab serve` exposes the
-> session over WebSocket; the React frontend renders the topology canvas,
-> edits it (palette, drag-and-drop, properties, save), edits scripted
-> traffic (add/update/remove), and shows a live CAN Analyzer (TX/RX filter,
+> session over WebSocket (plus background firmware runs with trace import);
+> the React frontend renders the topology canvas, edits it (palette,
+> drag-and-drop, properties, save), edits scripted traffic (add/update/remove),
+> runs firmware jobs, and shows a live CAN Analyzer (TX/RX filter,
 > pause/clear, CSV+JSON export).
 
 ## Quickstart
@@ -32,9 +33,9 @@ More: `docs/getting-started.md`, `docs/architecture.md`, `docs/can-model.md`.
 canlab new my-project                  # scaffold portable project dir
 canlab simulate project.canlab         # headless run (virtual or Renode)
 canlab simulate renode.canlab --run-secs 30 --export-json events.json
-canlab serve --project project.canlab  # local WebSocket API for the GUI
+canlab serve --project project.canlab [--max-jobs 2]  # local WebSocket API for the GUI
 canlab validate project.canlab         # schema + safety checks
-canlab doctor                          # Renode / toolchains / SocketCAN
+canlab doctor                          # Renode / dotnet / toolchains / SocketCAN
 ```
 
 ## GUI
@@ -104,6 +105,11 @@ The GUI is a web app with three parts: a network **canvas**, run/simulation
   freeze the view (resume picks up the backlog), **Clear** to drop rendered
   rows, and **Export CSV/JSON** to save the trace. The table is capped
   at 500 rows.
+- **Renode firmware runs**: start real STM32F103 firmware in the
+  background (project path + run budget), watch jobs poll to done, then
+  **Import trace** to replay observed firmware frames into the analyzer.
+  Needs the fixture ELFs (`firmware/tests/stm32_can/build.sh`) and the
+  dotnet runtime if your renode requires it (`canlab doctor` tells you).
 - The API repo note in-app always assumes `canlab serve` runs from the repo
   root.
 

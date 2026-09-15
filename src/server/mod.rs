@@ -6,6 +6,7 @@
 //! connections behind a `Mutex` — the browser can open the editor twice
 //! without forking the simulation.
 
+pub mod jobs;
 pub mod proto;
 pub mod serve;
 pub mod session;

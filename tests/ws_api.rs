@@ -6,7 +6,7 @@
 //! No browser needed; the same JSON contract `frontend/src/api.ts` uses.
 
 use cansimcan::server::serve::serve_ephemeral;
-use cansimcan::server::session::Session;
+use cansimcan::server::serve::ServerState;
 use std::sync::{Arc, Mutex};
 use tungstenite::Message;
 
@@ -40,7 +40,7 @@ fn ws_load_start_events_inject_reset() {
     let proj = dir.join("p.canlab");
     std::fs::write(&proj, PROJECT).unwrap();
 
-    let port = serve_ephemeral(Arc::new(Mutex::new(Session::new())));
+    let port = serve_ephemeral(Arc::new(Mutex::new(ServerState::new(1))));
     let (mut ws, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}")).unwrap();
 
     // No project yet: status is idle, Start fails with guidance.
@@ -122,7 +122,7 @@ fn ws_edit_save_flow() {
     std::fs::create_dir_all(&dir).unwrap();
     let target = dir.join("built.canlab");
 
-    let port = serve_ephemeral(Arc::new(Mutex::new(Session::new())));
+    let port = serve_ephemeral(Arc::new(Mutex::new(ServerState::new(1))));
     let (mut ws, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}")).unwrap();
 
     // Blank canvas: no path, dirty, cannot run yet.
@@ -224,6 +224,49 @@ fn ws_edit_save_flow() {
     assert_eq!(removed["type"], "Status");
     let proj = rpc(&mut ws, r#"{"type":"GetProject"}"#);
     assert_eq!(proj["project"]["messages"].as_array().unwrap().len(), 0);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ws_renode_jobs_reject_bad_input_without_emulator() {
+    let dir = std::env::temp_dir().join(format!("canlab-ws-renode-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let port = serve_ephemeral(Arc::new(Mutex::new(ServerState::new(1))));
+    let (mut ws, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}")).unwrap();
+
+    // Empty table lists clean.
+    let list = rpc(&mut ws, r#"{"type":"ListRenodeJobs"}"#);
+    assert_eq!(list["type"], "RenodeJobList");
+    assert_eq!(list["jobs"].as_array().unwrap().len(), 0);
+
+    // Missing project file: Error, no job created.
+    let req = serde_json::json!({"type": "StartRenodeRun", "path": dir.join("nope.canlab").display().to_string()}).to_string();
+    let err = rpc(&mut ws, &req);
+    assert_eq!(err["type"], "Error");
+    let list = rpc(&mut ws, r#"{"type":"ListRenodeJobs"}"#);
+    assert_eq!(list["jobs"].as_array().unwrap().len(), 0);
+
+    // Virtual project: all-renode contract fails before any spawn.
+    let virt = dir.join("virt.canlab");
+    std::fs::write(
+        &virt,
+        "version: 1\nsimulation: {mode: deterministic}\nbuses:\n  - {id: b, type: can, bitrate: 500000, fd: false}\nnodes:\n  - {id: n, device: stm32f103, backend: virtual, can: {bus: b}}\n",
+    )
+    .unwrap();
+    let req = serde_json::json!({"type": "StartRenodeRun", "path": virt.display().to_string()})
+        .to_string();
+    let err = rpc(&mut ws, &req);
+    assert_eq!(err["type"], "Error");
+    assert!(err["message"].as_str().unwrap().contains("virtual"));
+
+    // Unknown job ids name themselves on poll and import.
+    let err = rpc(&mut ws, r#"{"type":"GetRenodeJob","jobId":99}"#);
+    assert_eq!(err["type"], "Error");
+    assert!(err["message"].as_str().unwrap().contains("99"));
+    let err = rpc(&mut ws, r#"{"type":"ImportRenodeTrace","jobId":99}"#);
+    assert_eq!(err["type"], "Error");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

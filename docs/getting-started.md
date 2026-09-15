@@ -106,6 +106,22 @@ loaded network, the scripted-traffic panel edits what Run transmits
 selector, pause/clear, click-to-inspect, CSV/JSON export). Protocol
 details: `docs/api.md`.
 
+## Run firmware from the GUI (Renode job table)
+
+```bash
+./firmware/tests/stm32_can/build.sh
+export PATH="$PWD/.tools/dotnet:$PATH"   # only if your renode needs it (see above)
+cargo run -q --bin canlab -- serve [--max-jobs 2]
+```
+
+In the *Renode firmware runs* panel: path
+`firmware/tests/stm32_can/two_nodes.canlab.yaml`, budget `30`, Start.
+Poll to `done`, then **Import trace** — the observed firmware frames
+replay into the analyzer. Headless equivalent:
+`canlab simulate firmware/tests/stm32_can/two_nodes.canlab.yaml --run-secs 30`.
+See `docs/mcu-backends.md` (limits: no cancellation yet, newest 32
+finished jobs kept, full UART logs are CLI-only).
+
 ## Scaffold and validate a project
 
 ```bash

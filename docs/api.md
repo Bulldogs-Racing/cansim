@@ -41,6 +41,10 @@ canlab serve --port 21011 [--project <file>]
 | `AddMessage { message }` | `Status` | Appends a scripted frame (sender must exist; id range + DLC enforced). |
 | `UpdateMessage { index, message }` | `Status` | Replaces the frame at `index`. |
 | `RemoveMessage { index }` | `Status` | Deletes the frame at `index` (later rows shift — see `bugs.md`). |
+| `StartRenodeRun { path, runSecs? }` | `RenodeJobStarted { jobId }` | Validates an all-`renode` project file and starts a supervised firmware run on a background thread (prompt reply, never blocks). `runSecs` defaults to 30. Refused when the `--max-jobs` running budget is exhausted. |
+| `GetRenodeJob { jobId }` | `RenodeJob { job }` | One job: `state` (`running`/`done`/`failed`), TX/RX counts, `error`. |
+| `ListRenodeJobs` | `RenodeJobList { jobs }` | All jobs, oldest first. The GUI polls this alongside events. |
+| `ImportRenodeTrace { jobId }` | `TraceImported { transmitted, received, nextSeq }` | Replays a `done` job's observed TX frames through the session engine (batch-inject at current engine time) so the analyzer shows firmware traffic. Fails while `running`, surfaces the job error when `failed`, and requires the session to contain the observed senders. |
 
 ## Editing semantics
 
@@ -80,8 +84,13 @@ are pure frontend state — no protocol change:
 
 - No push broadcast yet — polling is the v1 contract and is covered by
   `tests/ws_api.rs` (real client ↔ real server over loopback).
-- No Renode supervision over WS yet: firmware runs stay in
-  `canlab simulate` (see `docs/mcu-backends.md`). The protocol already has
-  room (`Status.state`, per-node backends in `Project`).
+- Renode jobs run on background threads against project *files*,
+  independent of the loaded session: the session may hold a virtual
+  project under edit while firmware runs. At most `--max-jobs`
+  (`canlab serve --max-jobs N`, default 1) run concurrently; only the
+  newest 32 finished records are kept (older polls/imports report an
+  explicit unknown-job error). Full UART logs stay server-side — the CLI
+  remains the place for them (`docs/mcu-backends.md`). Live coverage:
+  `tests/renode_ws.rs` (ignored; needs ELFs + emulator + runtime).
 - No auth: loopback-only by design. Never bind this to a public interface
   without adding authentication first.

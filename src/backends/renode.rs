@@ -19,6 +19,7 @@ use super::api::{
     BackendError, BackendOutcome, FrameDir, McuBackend, NodeFirmware, ObservedFrame, ObservedUart,
     RenodeRunSpec,
 };
+use crate::project::Project;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -228,6 +229,84 @@ fn runtime_usable(version: &str) -> bool {
         .and_then(|m| m.parse::<u64>().ok())
         .map(|major| major >= 8)
         .unwrap_or(false)
+}
+
+/// Build a [`RenodeRunSpec`] from an already-validated [`Project`].
+///
+/// Shared by the headless CLI and the WebSocket job table so both enforce
+/// the same contract: all nodes on `backend: renode` (mixed projects fail
+/// with [`BackendError::MixedBackends` — cross-backend time sync is not
+/// implemented), first declared bus (CLI parity: multi-bus routing is
+/// deferred, §72), firmware resolved relative to the project file, and
+/// every node pre-checked ([`RenodeBackend::check_node`]) so config errors
+/// fail before any emulator spawns.
+pub fn spec_from_project(
+    project: &Project,
+    project_path: &Path,
+    run_secs: u64,
+) -> Result<RenodeRunSpec, BackendError> {
+    let mut kinds: Vec<&str> = project.nodes.iter().map(|n| n.backend.as_str()).collect();
+    kinds.sort();
+    kinds.dedup();
+    if kinds != ["renode"] {
+        return Err(BackendError::MixedBackends {
+            found: kinds.join(", "),
+        });
+    }
+    let bus = project
+        .buses
+        .first()
+        .ok_or_else(|| BackendError::Io("renode run needs at least one bus".into()))?;
+    let project_dir = project_path.parent().unwrap_or(Path::new("."));
+    let mut nodes = Vec::new();
+    for n in &project.nodes {
+        let fw = match &n.firmware {
+            Some(f) => join_project_relative(project_dir, f),
+            None => {
+                return Err(BackendError::FirmwareMissing {
+                    node: n.id.clone(),
+                    path: "<no firmware path set>".into(),
+                });
+            }
+        };
+        let node = NodeFirmware {
+            machine: NodeFirmware::machine_name(&n.id),
+            node_id: n.id.clone(),
+            device: n.device.clone(),
+            elf: fw,
+        };
+        RenodeBackend::check_node(&node)?;
+        nodes.push(node);
+    }
+    if nodes.is_empty() {
+        return Err(BackendError::Io(
+            "renode run needs at least one node".into(),
+        ));
+    }
+    Ok(RenodeRunSpec {
+        bus_id: bus.id.clone(),
+        bitrate: bus.bitrate,
+        nodes,
+        run_secs: run_secs.max(1),
+    })
+}
+
+/// Join a project-relative firmware path onto its project directory,
+/// collapsing lexical `.` (no FS access; `..` is rejected earlier by
+/// project validation, so only `.` needs collapsing).
+fn join_project_relative(base: &Path, rel: &str) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in base.join(rel).components() {
+        if c == Component::CurDir {
+            continue;
+        }
+        out.push(c);
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    out
 }
 
 /// Pure `.resc` generator: one machine per node, all CAN1s on one hub.
@@ -665,6 +744,62 @@ mod tests {
         assert_ne!(a, b);
         std::fs::remove_dir_all(&a).unwrap();
         std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    fn write_elf(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, [0x7F, b'E', b'L', b'F', 0, 0, 0, 0]).unwrap();
+        path
+    }
+
+    const RENODE_PROJ: &str = r#"
+version: 1
+simulation: {mode: deterministic}
+buses:
+  - {id: vehicle_bus, type: can, bitrate: 500000, fd: false}
+nodes:
+  - {id: engine_ecu, device: stm32f103, backend: renode, firmware: ./engine.elf, can: {bus: vehicle_bus}}
+  - {id: dashboard, device: stm32f103, backend: renode, firmware: ./dash.elf, can: {bus: vehicle_bus}}
+"#;
+
+    #[test]
+    fn spec_from_project_resolves_and_clamps() {
+        let dir = std::env::temp_dir().join(format!("canlab-spec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_elf(&dir, "engine.elf");
+        write_elf(&dir, "dash.elf");
+        let proj = Project::parse(RENODE_PROJ).unwrap();
+        let spec = spec_from_project(&proj, &dir.join("p.canlab"), 0).unwrap();
+        // run_secs 0 is meaningless (instant shutdown) — clamped to 1.
+        assert_eq!(spec.run_secs, 1);
+        assert_eq!(spec.bus_id, "vehicle_bus");
+        assert_eq!(spec.nodes.len(), 2);
+        assert_eq!(spec.nodes[0].machine, "engine_ecu");
+        assert!(spec.nodes[0].elf.is_absolute());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spec_from_project_rejects_mixed_and_missing() {
+        let dir = std::env::temp_dir().join(format!("canlab-spec-rej-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // engine.elf exists so the missing-firmware probe reaches dashboard.
+        write_elf(&dir, "engine.elf");
+        let proj = Project::parse(RENODE_PROJ).unwrap();
+        // Missing ELF files fail before any emulator spawns.
+        let err = spec_from_project(&proj, &dir.join("p.canlab"), 5).unwrap_err();
+        assert!(err.to_string().contains("not found"), "{err}");
+        // Mixed backends are never silently time-synced.
+        let mixed = RENODE_PROJ.replacen("backend: renode", "backend: virtual", 1);
+        let err = spec_from_project(&Project::parse(&mixed).unwrap(), &dir.join("p.canlab"), 5)
+            .unwrap_err();
+        assert!(matches!(err, BackendError::MixedBackends { .. }), "{err}");
+        // A node without firmware fails with its name attached.
+        let nofw = RENODE_PROJ.replace(", firmware: ./dash.elf", "");
+        let err = spec_from_project(&Project::parse(&nofw).unwrap(), &dir.join("p.canlab"), 5)
+            .unwrap_err();
+        assert!(err.to_string().contains("dashboard"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

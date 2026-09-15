@@ -21,6 +21,7 @@ import {
   NodeDecl,
   ProjectBus,
   ProjectNode,
+  RenodeJob,
   SeqEvent,
   ServerMsg,
 } from "./api";
@@ -76,6 +77,9 @@ export default function App(): JSX.Element {
   const [filter, setFilter] = useState("");
   const [dirFilter, setDirFilter] = useState<"all" | "TX" | "RX">("all");
   const [paused, setPaused] = useState(false);
+  const [renodePath, setRenodePath] = useState("firmware/tests/stm32_can/two_nodes.canlab.yaml");
+  const [runSecsText, setRunSecsText] = useState("30");
+  const [jobs, setJobs] = useState<RenodeJob[]>([]);
   const [selected, setSelected] = useState<AnalyzerRow | null>(null);
   const [summary, setSummary] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -172,11 +176,26 @@ export default function App(): JSX.Element {
     }
   }, []);
 
+  /** Poll the Renode job table (same quiet contract as events). */
+  const refreshJobs = useCallback(async () => {
+    const api = apiRef.current;
+    if (!api?.connected) return;
+    try {
+      const reply = await api.request({ type: "ListRenodeJobs" });
+      if (reply.type === "RenodeJobList") setJobs(reply.jobs);
+    } catch {
+      // stay quiet to avoid spam; Start/Import surface errors directly
+    }
+  }, []);
+
   useEffect(() => {
     if (!connected) return;
-    const timer = setInterval(pollEvents, 500);
+    const timer = setInterval(() => {
+      void pollEvents();
+      void refreshJobs();
+    }, 500);
     return () => clearInterval(timer);
-  }, [connected, pollEvents]);
+  }, [connected, pollEvents, refreshJobs]);
 
   const connect = useCallback(async () => {
     setError(null);
@@ -191,10 +210,11 @@ export default function App(): JSX.Element {
       setConnected(true);
       await refreshStatus(api);
       await refreshProject(api); // picks up a --project preload, if any
+      await refreshJobs(); // picks up jobs started by other tabs
     } catch (e) {
       showError(e instanceof Error ? e.message : String(e));
     }
-  }, [refreshStatus, refreshProject, showError]);
+  }, [refreshJobs, refreshStatus, refreshProject, showError]);
 
   const runCmd = useCallback(async (label: string, msg: ClientMsg) => {
     const api = apiRef.current;
@@ -245,6 +265,49 @@ export default function App(): JSX.Element {
   }, [applyStatus, refreshProject, showError]);
 
   const load = useCallback(() => editCmd("Load", { type: "Load", path: projectPath }), [editCmd, projectPath]);
+
+  /** Renode jobs: Start returns immediately (background thread on the
+   *  server); TraceImported replays firmware traffic into the analyzer. */
+  const renodeCmd = useCallback(async (label: string, msg: ClientMsg) => {
+    const api = apiRef.current;
+    if (!api) {
+      showError("not connected — press Connect first");
+      return;
+    }
+    setError(null);
+    setSummary(null);
+    try {
+      const reply = await api.request(msg);
+      const err = replyError(reply);
+      if (err) {
+        showError(`${label}: ${err}`);
+        return;
+      }
+      if (reply.type === "RenodeJobStarted") {
+        setSummary(`Renode job ${reply.jobId} started — polling until it finishes.`);
+      } else if (reply.type === "TraceImported") {
+        setSummary(`Imported firmware traffic: ${reply.transmitted} transmitted, ${reply.received} received.`);
+      }
+      await refreshStatus(api);
+      await refreshJobs();
+      await pollEvents();
+    } catch (e) {
+      showError(e instanceof Error ? e.message : String(e));
+    }
+  }, [pollEvents, refreshJobs, refreshStatus, showError]);
+
+  const startRenode = useCallback(() => {
+    if (!renodePath.trim()) {
+      showError("StartRenodeRun: enter a renode project path first");
+      return;
+    }
+    const secs = Number(runSecsText);
+    if (!Number.isInteger(secs) || secs < 1) {
+      showError(`StartRenodeRun: run time must be an integer >= 1 (got "${runSecsText}")`);
+      return;
+    }
+    void renodeCmd("StartRenodeRun", { type: "StartRenodeRun", path: renodePath.trim(), runSecs: secs });
+  }, [renodeCmd, renodePath, runSecsText, showError]);
 
   const newProject = useCallback(() => {
     if (!window.confirm("Discard the current session and start a blank project?")) return;
@@ -477,6 +540,48 @@ export default function App(): JSX.Element {
           onUpdate={(index, message) => editCmd("UpdateMessage", { type: "UpdateMessage", index, message })}
           onRemove={(index) => editCmd("RemoveMessage", { type: "RemoveMessage", index })}
         />
+      )}
+
+      {connected && (
+        <section aria-label="renode runs" style={{ background: "#0b1220", borderRadius: 12, border: "1px solid #1f2937", padding: 12, marginBottom: 12 }}>
+          <h2 style={{ margin: "0 0 8px", fontSize: 16 }}>Renode firmware runs ({jobs.length})</h2>
+          <p style={{ margin: "0 0 8px", color: "#9ca3af", fontSize: 13 }}>
+            Real STM32F103 firmware in the background: Start returns immediately, the table polls until the
+            job is done, then Import replays its observed TX frames into the analyzer. Full UART logs stay
+            on the server — use <code>canlab simulate</code> for those.
+          </p>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+            <input aria-label="renode project file path" title="Renode project path (server-side, relative to serve cwd; all nodes must use backend renode)" style={{ ...btn, minWidth: 300, cursor: "text" }} value={renodePath} onChange={(e) => setRenodePath(e.target.value)} />
+            <input aria-label="run time in seconds" title="wall-clock run budget in seconds" style={{ ...btn, width: 80, cursor: "text" }} value={runSecsText} onChange={(e) => setRunSecsText(e.target.value)} />
+            <button style={btn} onClick={startRenode}>▶ Start firmware run</button>
+          </div>
+          {jobs.length > 0 && (
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ textAlign: "left", color: "#9ca3af" }}>
+                  <th>ID</th><th>Project</th><th>State</th><th>TX</th><th>RX</th><th>Error</th><th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {jobs.map((j) => (
+                  <tr key={j.jobId}>
+                    <td>{j.jobId}</td>
+                    <td style={{ fontFamily: "monospace" }}>{j.project}</td>
+                    <td>
+                      <span style={{ padding: "2px 10px", borderRadius: 999, background: j.state === "done" ? "#14532d" : j.state === "failed" ? "#7f1d1d" : "#1f2937", border: "1px solid #374151" }}>
+                        ● {j.state}
+                      </span>
+                    </td>
+                    <td>{j.transmitted}</td>
+                    <td>{j.received}</td>
+                    <td style={{ color: "#fca5a5", maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={j.error ?? ""}>{j.error ?? ""}</td>
+                    <td>{j.state === "done" && <button style={btn} onClick={() => renodeCmd("ImportRenodeTrace", { type: "ImportRenodeTrace", jobId: j.jobId })}>Import trace</button>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
       )}
 
       <section aria-label="can analyzer" style={{ background: "#0b1220", borderRadius: 12, border: "1px solid #1f2937", padding: 12 }}>

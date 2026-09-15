@@ -29,7 +29,11 @@ export type ClientMsg =
   | { type: "SaveProject"; path?: string | null }
   | { type: "AddMessage"; message: MessageDecl }
   | { type: "UpdateMessage"; index: number; message: MessageDecl }
-  | { type: "RemoveMessage"; index: number };
+  | { type: "RemoveMessage"; index: number }
+  | { type: "StartRenodeRun"; path: string; runSecs?: number }
+  | { type: "GetRenodeJob"; jobId: number }
+  | { type: "ListRenodeJobs" }
+  | { type: "ImportRenodeTrace"; jobId: number };
 
 /** Wire shape of CanId (externally-tagged Rust enum). */
 export type WireCanId = { Standard: number } | { Extended: number };
@@ -121,6 +125,17 @@ export const KNOWN_DEVICES = [
   "generic_can_node",
 ];
 
+/** One background firmware run (mirror of JobInfo in src/server/proto.rs). */
+export interface RenodeJob {
+  jobId: number;
+  project: string;
+  runSecs: number;
+  state: "running" | "done" | "failed";
+  transmitted: number;
+  received: number;
+  error: string | null;
+}
+
 export type ServerMsg =
   | { type: "Status"; state: EngineState; projectPath: string | null; buses: string[]; nodes: string[]; nextSeq: number; dirty: boolean }
   | { type: "Events"; events: SeqEvent[]; nextSeq: number }
@@ -128,6 +143,10 @@ export type ServerMsg =
   | { type: "RunSummary"; transmitted: number; received: number; nextSeq: number }
   | { type: "Stepped"; nowNs: number; nextSeq: number }
   | { type: "Injected"; receivers: number; nextSeq: number }
+  | { type: "RenodeJobStarted"; jobId: number }
+  | { type: "RenodeJob"; job: RenodeJob }
+  | { type: "RenodeJobList"; jobs: RenodeJob[] }
+  | { type: "TraceImported"; transmitted: number; received: number; nextSeq: number }
   | { type: "Pong" }
   | { type: "Error"; message: string };
 

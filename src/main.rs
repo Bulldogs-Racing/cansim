@@ -57,6 +57,9 @@ enum Commands {
         /// Project file to preload into the session.
         #[arg(long)]
         project: Option<PathBuf>,
+        /// Max concurrent background Renode firmware runs (job table).
+        #[arg(long, default_value_t = 1)]
+        max_jobs: u16,
     },
     /// Diagnose the environment: Renode, toolchains, SocketCAN, …
     Doctor,
@@ -74,9 +77,11 @@ fn main() {
             run_secs,
         } => cmd_simulate(&project, export_json.as_deref(), run_secs),
         Commands::Validate { project } => cmd_validate(&project),
-        Commands::Serve { port, project } => {
-            cansimcan::server::serve::serve(port, project.as_deref())
-        }
+        Commands::Serve {
+            port,
+            project,
+            max_jobs,
+        } => cansimcan::server::serve::serve(port, project.as_deref(), max_jobs),
         Commands::Doctor => cmd_doctor(),
         Commands::Open { project } => {
             eprintln!(

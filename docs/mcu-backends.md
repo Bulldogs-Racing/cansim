@@ -46,6 +46,28 @@ checks this up front (`DotnetMissing` / `DotnetTooOld` with install
 instructions) and `canlab doctor` probes it — a present-but-unrunnable
 Renode fails fast instead of dying mid-run inside the emulator child.
 
+## Interactive runs (WS job table)
+
+`canlab serve [--max-jobs N]` (default 1) runs firmware in the
+background while the GUI stays interactive:
+
+1. Build the fixture firmware (`./firmware/tests/stm32_can/build.sh`).
+2. In the GUI's *Renode firmware runs* panel: path
+   `firmware/tests/stm32_can/two_nodes.canlab.yaml`, run budget, Start.
+3. The job table polls to `done`; **Import trace** replays the observed
+   TX frames through the session engine so the CAN Analyzer shows
+   firmware traffic.
+
+Protocol: `StartRenodeRun` / `GetRenodeJob` / `ListRenodeJobs` /
+`ImportRenodeTrace` (`docs/api.md`). Semantics: jobs run against project
+files (same contract as headless: all-`renode` nodes, first bus,
+project-relative firmware, per-node pre-checks — shared builder
+`spec_from_project` so CLI and GUI agree); import is batch-inject at the
+current engine time and needs the session to contain the observed
+senders. Limits (explicit): no job cancellation yet, no per-job UART
+over WS (use headless `simulate` for full logs), newest 32 finished jobs
+kept. Live coverage: `cargo test --test renode_ws -- --ignored`.
+
 ```bash
 canlab simulate project.canlab [--run-secs 30] [--export-json events.json]
 ```

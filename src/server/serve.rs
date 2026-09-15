@@ -7,18 +7,44 @@
 //! Every request gets exactly one JSON reply. `GetEvents { sinceSeq }` is
 //! the analyzer's poll primitive — the GUI polls it and renders new rows.
 
-use super::proto::{parse_client_msg, seq_event, state_name, ClientMsg, ServerMsg};
+use super::jobs::{JobRecord, JobState, JobTable};
+use super::proto::{parse_client_msg, seq_event, state_name, ClientMsg, JobInfo, ServerMsg};
 use super::session::Session;
+use crate::backends::api::McuBackend;
+use crate::backends::renode::{spec_from_project, RenodeBackend};
+use crate::project::{validate_project, Project};
 use std::net::TcpListener;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tungstenite::Message;
 
+/// Authoritative server state: one loaded project + engine ([`Session`])
+/// plus the background firmware-run table ([`JobTable`]), shared by all
+/// connections behind one `Mutex`.
+#[derive(Debug)]
+pub struct ServerState {
+    pub session: Session,
+    pub jobs: JobTable,
+}
+
+impl ServerState {
+    pub fn new(max_jobs: u16) -> Self {
+        ServerState {
+            session: Session::new(),
+            jobs: JobTable::new(max_jobs),
+        }
+    }
+}
+
 /// Serve forever on `127.0.0.1:port`. Returns only on accept failure.
-pub fn serve(port: u16, preload: Option<&Path>) -> i32 {
-    let session = Arc::new(Mutex::new(Session::new()));
+pub fn serve(port: u16, preload: Option<&Path>, max_jobs: u16) -> i32 {
+    if max_jobs == 0 {
+        eprintln!("--max-jobs must be at least 1 (no Renode job could ever start)");
+        return 1;
+    }
+    let state = Arc::new(Mutex::new(ServerState::new(max_jobs)));
     if let Some(path) = preload {
-        match session.lock().unwrap().load(path) {
+        match state.lock().unwrap().session.load(path) {
             Ok(()) => println!("Loaded {}", path.display()),
             Err(e) => {
                 eprintln!("cannot preload {}: {e}", path.display());
@@ -38,8 +64,8 @@ pub fn serve(port: u16, preload: Option<&Path>) -> i32 {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let session = Arc::clone(&session);
-                std::thread::spawn(move || handle_conn(stream, session));
+                let shared = Arc::clone(&state);
+                std::thread::spawn(move || handle_conn(stream, shared));
             }
             Err(e) => {
                 eprintln!("accept failed: {e}");
@@ -51,15 +77,15 @@ pub fn serve(port: u16, preload: Option<&Path>) -> i32 {
 }
 
 /// Bind an ephemeral port for tests; returns the chosen port.
-pub fn serve_ephemeral(session: Arc<Mutex<Session>>) -> u16 {
+pub fn serve_ephemeral(state: Arc<Mutex<ServerState>>) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
     let port = listener.local_addr().expect("local addr").port();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    let session = Arc::clone(&session);
-                    std::thread::spawn(move || handle_conn(stream, session));
+                    let shared = Arc::clone(&state);
+                    std::thread::spawn(move || handle_conn(stream, shared));
                 }
                 Err(_) => break,
             }
@@ -68,7 +94,7 @@ pub fn serve_ephemeral(session: Arc<Mutex<Session>>) -> u16 {
     port
 }
 
-fn handle_conn(stream: std::net::TcpStream, session: Arc<Mutex<Session>>) {
+fn handle_conn(stream: std::net::TcpStream, state: Arc<Mutex<ServerState>>) {
     let mut ws = match tungstenite::accept(stream) {
         Ok(ws) => ws,
         Err(_) => return,
@@ -80,7 +106,7 @@ fn handle_conn(stream: std::net::TcpStream, session: Arc<Mutex<Session>>) {
         };
         match msg {
             Message::Text(text) => {
-                let reply = dispatch(&session, &text);
+                let reply = dispatch(&state, &text);
                 let out = serde_json::to_string(&reply)
                     .unwrap_or_else(|_| r#"{"type":"Error","message":"encode failed"}"#.into());
                 if ws.send(Message::Text(out.into())).is_err() {
@@ -114,38 +140,38 @@ fn handle_conn(stream: std::net::TcpStream, session: Arc<Mutex<Session>>) {
 
 /// One request in, one reply out. Lock scope covers the whole dispatch so
 /// concurrent tabs observe a consistent session.
-fn dispatch(session: &Arc<Mutex<Session>>, text: &str) -> ServerMsg {
+fn dispatch(state: &Arc<Mutex<ServerState>>, text: &str) -> ServerMsg {
     let req = match parse_client_msg(text) {
         Ok(r) => r,
         Err(message) => return ServerMsg::Error { message },
     };
-    let mut s = session.lock().unwrap();
+    let mut s = state.lock().unwrap();
     match req {
         ClientMsg::Ping => ServerMsg::Pong,
-        ClientMsg::Load { path } => match s.load(Path::new(&path)) {
-            Ok(()) => status_of(&s),
+        ClientMsg::Load { path } => match s.session.load(Path::new(&path)) {
+            Ok(()) => status_of(&s.session),
             Err(e) => ServerMsg::Error {
                 message: e.to_string(),
             },
         },
-        ClientMsg::Start => match s.start() {
+        ClientMsg::Start => match s.session.start() {
             Ok(sum) => ServerMsg::RunSummary {
                 transmitted: sum.transmitted,
                 received: sum.received,
-                nextSeq: s.events().len(),
+                nextSeq: s.session.events().len(),
             },
             Err(e) => ServerMsg::Error {
                 message: e.to_string(),
             },
         },
-        ClientMsg::Pause => ok_or_error(s.pause().map(|()| status_of(&s))),
-        ClientMsg::Resume => ok_or_error(s.resume().map(|()| status_of(&s))),
-        ClientMsg::Stop => ok_or_error(s.stop().map(|()| status_of(&s))),
-        ClientMsg::Reset => ok_or_error(s.reset().map(|()| status_of(&s))),
-        ClientMsg::Step { deltaNs } => match s.step(deltaNs) {
+        ClientMsg::Pause => ok_or_error(s.session.pause().map(|()| status_of(&s.session))),
+        ClientMsg::Resume => ok_or_error(s.session.resume().map(|()| status_of(&s.session))),
+        ClientMsg::Stop => ok_or_error(s.session.stop().map(|()| status_of(&s.session))),
+        ClientMsg::Reset => ok_or_error(s.session.reset().map(|()| status_of(&s.session))),
+        ClientMsg::Step { deltaNs } => match s.session.step(deltaNs) {
             Ok(now) => ServerMsg::Stepped {
                 nowNs: now,
-                nextSeq: s.events().len(),
+                nextSeq: s.session.events().len(),
             },
             Err(e) => ServerMsg::Error {
                 message: e.to_string(),
@@ -156,17 +182,17 @@ fn dispatch(session: &Arc<Mutex<Session>>, text: &str) -> ServerMsg {
             id,
             extended,
             data,
-        } => match s.inject(&sender, id, extended, &data) {
+        } => match s.session.inject(&sender, id, extended, &data) {
             Ok(receivers) => ServerMsg::Injected {
                 receivers,
-                nextSeq: s.events().len(),
+                nextSeq: s.session.events().len(),
             },
             Err(e) => ServerMsg::Error {
                 message: e.to_string(),
             },
         },
         ClientMsg::GetEvents { sinceSeq } => {
-            let log = s.events();
+            let log = s.session.events();
             let from = sinceSeq.min(log.len());
             ServerMsg::Events {
                 events: log
@@ -179,46 +205,81 @@ fn dispatch(session: &Arc<Mutex<Session>>, text: &str) -> ServerMsg {
             }
         }
         ClientMsg::NewProject => {
-            s.new_project();
-            status_of(&s)
+            s.session.new_project();
+            status_of(&s.session)
         }
-        ClientMsg::AddBus { id, bitrate } => {
-            ok_or_error(s.add_bus(&id, bitrate).map(|()| status_of(&s)))
+        ClientMsg::AddBus { id, bitrate } => ok_or_error(
+            s.session
+                .add_bus(&id, bitrate)
+                .map(|()| status_of(&s.session)),
+        ),
+        ClientMsg::UpdateBus { id, bitrate } => ok_or_error(
+            s.session
+                .update_bus(&id, bitrate)
+                .map(|()| status_of(&s.session)),
+        ),
+        ClientMsg::RemoveBus { id } => {
+            ok_or_error(s.session.remove_bus(&id).map(|()| status_of(&s.session)))
         }
-        ClientMsg::UpdateBus { id, bitrate } => {
-            ok_or_error(s.update_bus(&id, bitrate).map(|()| status_of(&s)))
+        ClientMsg::AddNode { node } => {
+            ok_or_error(s.session.add_node(node).map(|()| status_of(&s.session)))
         }
-        ClientMsg::RemoveBus { id } => ok_or_error(s.remove_bus(&id).map(|()| status_of(&s))),
-        ClientMsg::AddNode { node } => ok_or_error(s.add_node(node).map(|()| status_of(&s))),
-        ClientMsg::UpdateNode { id, node } => {
-            ok_or_error(s.update_node(&id, node).map(|()| status_of(&s)))
+        ClientMsg::UpdateNode { id, node } => ok_or_error(
+            s.session
+                .update_node(&id, node)
+                .map(|()| status_of(&s.session)),
+        ),
+        ClientMsg::RemoveNode { id } => {
+            ok_or_error(s.session.remove_node(&id).map(|()| status_of(&s.session)))
         }
-        ClientMsg::RemoveNode { id } => ok_or_error(s.remove_node(&id).map(|()| status_of(&s))),
         ClientMsg::SaveProject { path } => {
             let target = path.as_deref().map(Path::new);
-            match s.save(target) {
-                Ok(()) => status_of(&s),
+            match s.session.save(target) {
+                Ok(()) => status_of(&s.session),
                 Err(e) => ServerMsg::Error {
                     message: e.to_string(),
                 },
             }
         }
-        ClientMsg::AddMessage { message } => {
-            ok_or_error(s.add_message(message).map(|()| status_of(&s)))
-        }
-        ClientMsg::UpdateMessage { index, message } => {
-            ok_or_error(s.update_message(index, message).map(|()| status_of(&s)))
-        }
-        ClientMsg::RemoveMessage { index } => {
-            ok_or_error(s.remove_message(index).map(|()| status_of(&s)))
-        }
-        ClientMsg::GetStatus => status_of(&s),
-        ClientMsg::GetProject => match s.project() {
+        ClientMsg::AddMessage { message } => ok_or_error(
+            s.session
+                .add_message(message)
+                .map(|()| status_of(&s.session)),
+        ),
+        ClientMsg::UpdateMessage { index, message } => ok_or_error(
+            s.session
+                .update_message(index, message)
+                .map(|()| status_of(&s.session)),
+        ),
+        ClientMsg::RemoveMessage { index } => ok_or_error(
+            s.session
+                .remove_message(index)
+                .map(|()| status_of(&s.session)),
+        ),
+        ClientMsg::GetStatus => status_of(&s.session),
+        ClientMsg::GetProject => match s.session.project() {
             Some(p) => ServerMsg::Project { project: p.clone() },
             None => ServerMsg::Error {
                 message: "no project loaded".into(),
             },
         },
+        ClientMsg::StartRenodeRun { path, runSecs } => {
+            // start_renode_job re-locks the state (id reservation, result
+            // store) — release the dispatch guard first; std Mutex is not
+            // reentrant and this deadlocked the server in testing.
+            drop(s);
+            start_renode_job(state, path, runSecs)
+        }
+        ClientMsg::GetRenodeJob { jobId } => match s.jobs.get(jobId) {
+            Ok(rec) => ServerMsg::RenodeJob { job: job_info(rec) },
+            Err(e) => ServerMsg::Error {
+                message: e.to_string(),
+            },
+        },
+        ClientMsg::ListRenodeJobs => ServerMsg::RenodeJobList {
+            jobs: s.jobs.list().iter().map(|r| job_info(r)).collect(),
+        },
+        ClientMsg::ImportRenodeTrace { jobId } => import_renode_trace(&mut s, jobId),
     }
 }
 
@@ -226,6 +287,142 @@ fn ok_or_error(r: Result<ServerMsg, super::session::SessionError>) -> ServerMsg 
     r.unwrap_or_else(|e| ServerMsg::Error {
         message: e.to_string(),
     })
+}
+
+/// Validate a renode project file and build its run spec without touching
+/// the session. File IO and validation happen outside the server lock;
+/// only id reservation takes the lock, and the emulator runs lock-free on
+/// a background thread that re-locks solely to store the outcome.
+fn start_renode_job(
+    state: &Arc<Mutex<ServerState>>,
+    path: String,
+    run_secs: Option<u64>,
+) -> ServerMsg {
+    let project_path = Path::new(&path);
+    let spec = match load_renode_project(project_path, run_secs.unwrap_or(30)) {
+        Ok(spec) => spec,
+        Err(message) => return ServerMsg::Error { message },
+    };
+    // Fail fast on a missing emulator/runtime before reserving a job id.
+    let backend = match RenodeBackend::discover() {
+        Ok(backend) => backend,
+        Err(e) => {
+            return ServerMsg::Error {
+                message: e.to_string(),
+            }
+        }
+    };
+    let job_id = {
+        let mut st = state.lock().unwrap();
+        match st
+            .jobs
+            .try_start(project_path.display().to_string(), spec.run_secs)
+        {
+            Ok(id) => id,
+            Err(e) => {
+                return ServerMsg::Error {
+                    message: e.to_string(),
+                }
+            }
+        }
+    };
+    let shared = Arc::clone(state);
+    std::thread::spawn(move || {
+        let result = backend.run(&spec).map_err(|e| e.to_string());
+        shared.lock().unwrap().jobs.finish(job_id, result);
+    });
+    ServerMsg::RenodeJobStarted { jobId: job_id }
+}
+
+/// Load + validate a renode project file into a run spec. Mirrors the
+/// headless CLI contract (all-renode nodes, first bus, project-relative
+/// firmware, per-node pre-checks) so GUI and CLI runs agree.
+fn load_renode_project(
+    path: &Path,
+    run_secs: u64,
+) -> Result<crate::backends::api::RenodeRunSpec, String> {
+    let proj = Project::load_from_file(path)
+        .map_err(|e| format!("invalid project {}: {e}", path.display()))?;
+    let base = path.parent().unwrap_or(Path::new("."));
+    let rep = validate_project(&proj, base);
+    if !rep.is_ok() {
+        let reasons = rep
+            .errors
+            .iter()
+            .map(|e| format!("[{}] {}", e.path, e.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!("invalid project {}: {reasons}", path.display()));
+    }
+    spec_from_project(&proj, path, run_secs).map_err(|e| e.to_string())
+}
+
+/// Replay a finished job's observed TX frames through the session engine.
+/// Fails when the job is unknown/still running/failed, or when the session
+/// holds no project containing the observed senders.
+fn import_renode_trace(s: &mut ServerState, job_id: u64) -> ServerMsg {
+    let rec = match s.jobs.get(job_id) {
+        Ok(rec) => rec,
+        Err(e) => {
+            return ServerMsg::Error {
+                message: e.to_string(),
+            }
+        }
+    };
+    match rec.state {
+        JobState::Running => {
+            return ServerMsg::Error {
+                message: format!(
+                    "Renode job {job_id} is still running — poll GetRenodeJob until it is done, then import"
+                ),
+            }
+        }
+        JobState::Failed => {
+            return ServerMsg::Error {
+                message: format!(
+                    "Renode job {job_id} failed: {}",
+                    rec.error.as_deref().unwrap_or("unknown error")
+                ),
+            }
+        }
+        JobState::Done => {}
+    }
+    let frames: Vec<(String, crate::can::frame::CanFrame)> = match &rec.outcome {
+        Some(outcome) => outcome
+            .tx_frames
+            .iter()
+            .map(|f| (f.node.clone(), f.frame.clone()))
+            .collect(),
+        None => {
+            return ServerMsg::Error {
+                message: format!(
+                    "Renode job {job_id} finished without observations (internal error)"
+                ),
+            }
+        }
+    };
+    match s.session.import_frames(&frames) {
+        Ok(sum) => ServerMsg::TraceImported {
+            transmitted: sum.transmitted,
+            received: sum.received,
+            nextSeq: s.session.events().len(),
+        },
+        Err(e) => ServerMsg::Error {
+            message: e.to_string(),
+        },
+    }
+}
+
+fn job_info(rec: &JobRecord) -> JobInfo {
+    JobInfo {
+        jobId: rec.id,
+        project: rec.project.clone(),
+        runSecs: rec.run_secs,
+        state: rec.state.name().into(),
+        transmitted: rec.transmitted,
+        received: rec.received,
+        error: rec.error.clone(),
+    }
 }
 
 fn status_of(s: &Session) -> ServerMsg {

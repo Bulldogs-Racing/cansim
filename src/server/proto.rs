@@ -107,6 +107,28 @@ pub enum ClientMsg {
     RemoveMessage {
         index: usize,
     },
+    /// Start a supervised Renode firmware run in the background (job
+    /// table). `path` is a project file with all nodes on
+    /// `backend: renode`; `runSecs` defaults to 30 (firmware loops
+    /// forever, so the budget ending is the normal end). Replies
+    /// `RenodeJobStarted` immediately — polling `GetRenodeJob` tracks it.
+    StartRenodeRun {
+        path: String,
+        #[serde(default)]
+        runSecs: Option<u64>,
+    },
+    /// Poll one background firmware run.
+    GetRenodeJob {
+        jobId: u64,
+    },
+    /// List background firmware runs, oldest first.
+    ListRenodeJobs,
+    /// Replay a finished job's observed TX frames through the session
+    /// engine (batch-inject at current engine time). Replies
+    /// `TraceImported`; the analyzer then shows firmware traffic.
+    ImportRenodeTrace {
+        jobId: u64,
+    },
 }
 
 /// Server → client (camelCase wire contract — see [`ClientMsg`]).
@@ -142,10 +164,39 @@ pub enum ServerMsg {
         receivers: usize,
         nextSeq: usize,
     },
+    RenodeJobStarted {
+        jobId: u64,
+    },
+    RenodeJob {
+        job: JobInfo,
+    },
+    RenodeJobList {
+        jobs: Vec<JobInfo>,
+    },
+    TraceImported {
+        transmitted: u64,
+        received: u64,
+        nextSeq: usize,
+    },
     Pong,
     Error {
         message: String,
     },
+}
+
+/// One background firmware run, as reported over the wire. Counts come
+/// from the finished run's parsed UART observations; the full log stays
+/// server-side (it can be megabytes) — the CLI remains the place for it.
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobInfo {
+    pub jobId: u64,
+    pub project: String,
+    pub runSecs: u64,
+    pub state: String,
+    pub transmitted: u64,
+    pub received: u64,
+    pub error: Option<String>,
 }
 
 /// One log entry with its sequence number (index in the session log).
@@ -277,5 +328,37 @@ mod tests {
         assert!(parse_client_msg("hello").is_err());
         assert!(parse_client_msg("{\"type\":\"Nope\"}").is_err());
         assert!(parse_client_msg("{\"type\":\"Step\",\"deltaNs\":5}").is_ok());
+    }
+
+    #[test]
+    fn renode_job_messages_round_trip() {
+        for raw in [
+            r#"{"type":"StartRenodeRun","path":"renode.canlab"}"#,
+            r#"{"type":"StartRenodeRun","path":"renode.canlab","runSecs":45}"#,
+            r#"{"type":"GetRenodeJob","jobId":2}"#,
+            r#"{"type":"ListRenodeJobs"}"#,
+            r#"{"type":"ImportRenodeTrace","jobId":2}"#,
+        ] {
+            assert!(parse_client_msg(raw).is_ok(), "{raw}");
+        }
+        // runSecs is optional on the wire.
+        let bare: ClientMsg =
+            serde_json::from_str(r#"{"type":"StartRenodeRun","path":"p.canlab"}"#).unwrap();
+        assert!(matches!(
+            bare,
+            ClientMsg::StartRenodeRun { runSecs: None, .. }
+        ));
+        let info = JobInfo {
+            jobId: 1,
+            project: "p.canlab".into(),
+            runSecs: 30,
+            state: "done".into(),
+            transmitted: 5,
+            received: 5,
+            error: None,
+        };
+        let json = serde_json::to_value(&ServerMsg::RenodeJobList { jobs: vec![info] }).unwrap();
+        assert_eq!(json["jobs"][0]["jobId"], 1);
+        assert_eq!(json["jobs"][0]["runSecs"], 30);
     }
 }

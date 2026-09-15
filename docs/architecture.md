@@ -45,7 +45,7 @@ src/can/          CAN core: id, frame, bus, arbitration, timing
 src/simulation/   SimClock, SimEvent log, headless Engine
 src/project/      versioned YAML project format + untrusted-input validation
 src/backends/     McuBackend seam (api) + Renode supervised runs (renode)
-src/server/       Session manager + JSON protocol + `canlab serve` (WebSocket)
+src/server/       Session manager + Renode job table + JSON protocol + `canlab serve` (WebSocket)
 src/main.rs       `canlab` CLI: new / simulate / validate / doctor / open / serve
 tests/can_core.rs §74 acceptance tests (arbitration + delivery)
 tests/renode_backend.rs live Renode test (ignored by default, needs ELF + emulator)
@@ -53,7 +53,7 @@ tests/ws_api.rs   WS contract test (real client ↔ server over loopback)
 examples/         runnable .canlab.yaml projects
 backends/renode/  REPL overlay, .resc scripts (checked-in spike scripts)
 firmware/tests/   bare-metal STM32F103 TX/RX fixtures + build.sh
-frontend/         React + React Flow editor shell: canvas, sim controls, analyzer
+frontend/         React + React Flow editor: canvas, sim controls, analyzer, scripted-traffic editor, Renode job panel
 docs/             user + developer documentation
 ```
 
@@ -69,6 +69,7 @@ docs/             user + developer documentation
 - [x] Phase 5 (slice 2) — topology editing: palette, drag-and-drop, save
 - [x] Phase 5 (slice 3) — scripted-messages editor (add/update/remove over WS + panel, incl. in-place edit UI)
 - [x] Phase 6 (slice 1) — analyzer depth: TX/RX filter, pause/clear capture, CSV+JSON export (view-local, no protocol change)
-- [ ] Phase 4 (WS part) — Renode job table over WS (`--max-jobs`, default 1) + trace import
+- [x] Phase 4 (WS part, slice 1) — Renode job table over WS: StartRenodeRun/GetRenodeJob/ListRenodeJobs/ImportRenodeTrace, `--max-jobs` (default 1), trace import into the session engine (live-verified: `tests/renode_ws.rs`)
+- [ ] Phase 4 (WS part, slice 2) — job cancellation, per-job UART over WS, Renode console/debugger surfacing (§50–§51)
 - [ ] Phase 7 — accuracy-first MCP2515 virtual execution + SPI timing
 - [ ] Phase 6+ — analyzer sorting/search, Teensy, faults, FD, DBC

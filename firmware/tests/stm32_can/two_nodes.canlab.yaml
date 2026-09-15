@@ -1,0 +1,33 @@
+# All-renode two-node project for background firmware runs
+# (`StartRenodeRun` over WS, or `canlab simulate` headless).
+#
+# Lives HERE, not in examples/: project firmware paths must stay under the
+# project directory (validation rejects ".." as traversal, §21), and the
+# ELFs are built into ./build/ by ./build.sh in this same directory
+# (gitignored output — build first; validation warns until then, runs fail
+# fast with the node name).
+version: 1
+
+simulation:
+  mode: deterministic
+
+buses:
+  - id: vehicle_bus
+    type: can
+    bitrate: 500000
+    fd: false
+
+nodes:
+  - id: engine_ecu
+    device: stm32f103
+    backend: renode
+    firmware: ./build/can_tx.elf
+    can:
+      bus: vehicle_bus
+
+  - id: dashboard
+    device: stm32f103
+    backend: renode
+    firmware: ./build/can_rx.elf
+    can:
+      bus: vehicle_bus

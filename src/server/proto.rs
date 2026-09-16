@@ -70,6 +70,15 @@ pub enum ClientMsg {
         #[serde(default)]
         dlc: u8,
     },
+    /// Decode one frame payload with a DBC file (Phase 12, slice 2):
+    /// `dbc` is a server-side path (relative to the serve cwd, like
+    /// project paths). Stateless — needs no loaded project.
+    DecodeFrame {
+        dbc: String,
+        id: u32,
+        #[serde(default)]
+        data: Vec<u8>,
+    },
     /// Drive one deterministically faulted frame now (Phase 9, single-shot).
     /// `fault` is the [`WireFault`] wire shape: `{"FlipBit": offset}`,
     /// `"CorruptCrc"`, or `"DropFrame"`. Out-of-range offsets are an
@@ -248,6 +257,11 @@ pub enum ServerMsg {
         wireBits: usize,
         wire: String,
     },
+    DecodedSignals {
+        idHex: String,
+        message: String,
+        signals: Vec<DecodedSignal>,
+    },
     FaultInjected {
         error: Option<CanErrorKind>,
         receivers: usize,
@@ -318,6 +332,14 @@ pub struct BitRegion {
     pub name: String,
     pub offset: usize,
     pub bits: String,
+}
+
+/// One DBC-decoded signal (see [`ClientMsg::DecodeFrame`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecodedSignal {
+    pub name: String,
+    pub value: f64,
+    pub unit: String,
 }
 
 /// One log entry with its sequence number (index in the session log).
@@ -540,6 +562,32 @@ mod tests {
         let json = serde_json::to_value(&rep).unwrap();
         assert_eq!(json["type"], "FrameBits");
         assert_eq!(json["regions"][0]["name"], "SOF");
+    }
+
+    #[test]
+    fn decode_frame_round_trip() {
+        let req = ClientMsg::DecodeFrame {
+            dbc: "vehicle.dbc".into(),
+            id: 0x100,
+            data: vec![0, 1, 2, 3],
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["type"], "DecodeFrame");
+        assert_eq!(json["dbc"], "vehicle.dbc");
+        let back: ClientMsg = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, ClientMsg::DecodeFrame { .. }));
+        let rep = ServerMsg::DecodedSignals {
+            idHex: "0x100".into(),
+            message: "EngineData".into(),
+            signals: vec![DecodedSignal {
+                name: "Rpm".into(),
+                value: 512.0,
+                unit: "rpm".into(),
+            }],
+        };
+        let json = serde_json::to_value(&rep).unwrap();
+        assert_eq!(json["type"], "DecodedSignals");
+        assert_eq!(json["signals"][0]["value"], 512.0);
     }
 
     #[test]

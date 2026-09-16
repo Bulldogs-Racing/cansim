@@ -108,7 +108,8 @@ The GUI is a web app with three parts: a network **canvas**, run/simulation
   `0x123`, range `0x100-0x2FF`, or id/mask `0x120/0x7F0`) plus a TX/RX/DROP/ARB
   direction selector, sort newest/oldest, click a row to inspect the frame
   in the inspector (**Show bit layout** decodes SOF/Arbitration/Control/Data/CRC
-  regions plus wire/stuff counts), **Pause capture** to freeze the view (resume picks up
+  regions plus wire/stuff counts; **Decode with DBC** decodes signals against
+  a server-side `.dbc` file), **Pause capture** to freeze the view (resume picks up
   the backlog), **Clear** to drop rendered rows, and **Export CSV/JSON/PCAP**
   to save the trace (PCAP uses the SocketCAN link type with simulated
   timestamps; ARB annotation rows are skipped there). The table is capped

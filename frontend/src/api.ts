@@ -17,6 +17,7 @@ export type ClientMsg =
   | { type: "Inject"; sender: string; id: number; extended?: boolean; data?: number[] }
   | { type: "Arbitrate"; frames: ArbitrateFrame[] }
   | { type: "InspectFrame"; id: number; extended?: boolean; data?: number[]; remote?: boolean; dlc?: number }
+  | { type: "DecodeFrame"; dbc: string; id: number; data?: number[] }
   | { type: "InjectFault"; sender: string; id: number; extended?: boolean; data?: number[]; fault: WireFault }
   | { type: "GetEvents"; sinceSeq?: number }
   | { type: "GetStatus" }
@@ -45,6 +46,13 @@ export type ClientMsg =
 
 /** Wire shape of WireFault (externally-tagged Rust enum, Phase 9). */
 export type WireFault = { FlipBit: number } | "CorruptCrc" | "DropFrame";
+
+/** One DBC-decoded signal (mirror of DecodedSignal). */
+export interface DecodedSignal {
+  name: string;
+  value: number;
+  unit: string;
+}
 
 /** One named bit-region of an inspected frame. */
 export interface BitRegion {
@@ -216,6 +224,7 @@ export type ServerMsg =
   | { type: "RenodeJobList"; jobs: RenodeJob[] }
   | { type: "RenodeLog"; jobId: number; total: number; lines: UartLine[] }
   | { type: "FrameBits"; idHex: string; extended: boolean; dlc: number; remote: boolean; regions: BitRegion[]; crcHex: string; stuffBits: number; wireBits: number; wire: string }
+  | { type: "DecodedSignals"; idHex: string; message: string; signals: DecodedSignal[] }
   | { type: "TraceImported"; transmitted: number; received: number; nextSeq: number }
   | { type: "Pong" }
   | { type: "Error"; message: string };

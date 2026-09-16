@@ -28,8 +28,18 @@ canlab dbc examples/vehicle.dbc --id 0x100 --data "00 10 50 0A 00 00 00 00"
 - Implementation: `src/dbc.rs` (`Dbc::parse`, `Dbc::decode`), tested with
   hand-computed Intel + Motorola vectors (no copied reference data).
 
+## GUI + WS decoding (slice 2)
+
+`DecodeFrame { dbc, id, data }` decodes one payload against a
+server-side `.dbc` path (relative to the serve cwd, like project paths)
+and replies `DecodedSignals`; the frame inspector's **Decode with DBC**
+button calls it for the selected row (path box defaults to
+`examples/vehicle.dbc`). The file parses per request — DBC files are
+small, and every failure (missing file, unknown id, short payload) is an
+actionable `Error`.
+
 ## Deferred (explicit)
 
 Multiplexing, `VAL_` tables, attributes/comments, extended multiplexing,
-J1939 protocol decoding, DBC writing, GUI signal views, and `.dbc`
+J1939 protocol decoding, DBC writing, and `.dbc`
 references from project files.

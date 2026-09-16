@@ -23,6 +23,7 @@ import {
   NodeDecl,
   parseIdFilter,
   rowsToPcap,
+  DecodedSignal,
   FrameBits,
   ProjectBus,
   ProjectNode,
@@ -95,6 +96,8 @@ export default function App(): JSX.Element {
   const [logTotal, setLogTotal] = useState(0);
   const [selected, setSelected] = useState<AnalyzerRow | null>(null);
   const [bitLayout, setBitLayout] = useState<FrameBits | null>(null);
+  const [dbcPath, setDbcPath] = useState("examples/vehicle.dbc");
+  const [decoded, setDecoded] = useState<{ message: string; signals: DecodedSignal[] } | null>(null);
   const [summary, setSummary] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -296,6 +299,7 @@ export default function App(): JSX.Element {
       setRows([]);
       setSelected(null);
       setBitLayout(null);
+      setDecoded(null);
       await refreshProject(api);
     } catch (e) {
       showError(e instanceof Error ? e.message : String(e));
@@ -478,6 +482,7 @@ export default function App(): JSX.Element {
     setRows([]);
     setSelected(null);
     setBitLayout(null);
+    setDecoded(null);
   }, []);
 
   const exportCsv = useCallback(() => {
@@ -535,6 +540,37 @@ export default function App(): JSX.Element {
       showError(e instanceof Error ? e.message : String(e));
     }
   }, [showError]);
+
+  /** DBC signal decoding of the selected frame (§38): stateless
+   *  DecodeFrame round trip against a server-side .dbc path. */
+  const decodeSignals = useCallback(async (row: AnalyzerRow) => {
+    const api = apiRef.current;
+    if (!api) {
+      showError("not connected — press Connect first");
+      return;
+    }
+    if (!dbcPath.trim()) {
+      showError("DecodeFrame: enter a DBC file path first (server-side, relative to serve cwd)");
+      return;
+    }
+    setError(null);
+    try {
+      const data = row.data.trim() === "" ? [] : row.data.trim().split(/\s+/).map((b) => Number(`0x${b}`));
+      const reply = await api.request({
+        type: "DecodeFrame",
+        dbc: dbcPath.trim(),
+        id: Number(row.id),
+        data,
+      });
+      if (reply.type === "DecodedSignals") {
+        setDecoded({ message: reply.message, signals: reply.signals });
+      } else if (reply.type === "Error") {
+        showError(`DecodeFrame: ${reply.message}`);
+      }
+    } catch (e) {
+      showError(e instanceof Error ? e.message : String(e));
+    }
+  }, [dbcPath, showError]);
 
   const btn: React.CSSProperties = { padding: "6px 12px", borderRadius: 6, border: "1px solid #374151", background: "#1f2937", color: "#e5e7eb", cursor: "pointer" };
   const selDecl = canvasSel ? parseFlowId(canvasSel) : null;
@@ -761,7 +797,7 @@ export default function App(): JSX.Element {
             </thead>
             <tbody>
               {visibleRows.map((r) => (
-                <tr key={r.seq} onClick={() => { setSelected(r); setBitLayout(null); }} style={{ cursor: "pointer", background: selected?.seq === r.seq ? "#1e3a8a" : "transparent" }}>
+                <tr key={r.seq} onClick={() => { setSelected(r); setBitLayout(null); setDecoded(null); }} style={{ cursor: "pointer", background: selected?.seq === r.seq ? "#1e3a8a" : "transparent" }}>
                   <td>{fmtTimeNs(r.timeNs)}</td>
                   <td>{r.dir}</td>
                   <td>{r.node}</td>
@@ -786,6 +822,31 @@ export default function App(): JSX.Element {
                 <dt>Timestamp</dt><dd>{fmtTimeNs(selected.timeNs)}</dd>
               </dl>
               <button style={{ ...btn, marginTop: 8 }} onClick={() => inspectBits(selected)}>Show bit layout</button>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
+                <input aria-label="dbc file path" title="DBC file path (server-side, relative to serve cwd)" placeholder="examples/vehicle.dbc" style={{ ...btn, cursor: "text", minWidth: 200 }} value={dbcPath} onChange={(e) => setDbcPath(e.target.value)} />
+                <button style={btn} onClick={() => decodeSignals(selected)}>Decode with DBC</button>
+              </div>
+              {decoded && (
+                <div style={{ marginTop: 8, fontSize: 12 }}>
+                  <p style={{ margin: "0 0 4px", color: "#9ca3af" }}>
+                    {decoded.message} ({decoded.signals.length} signal(s)):
+                  </p>
+                  {decoded.signals.length > 0 ? (
+                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                      <tbody>
+                        {decoded.signals.map((s) => (
+                          <tr key={s.name}>
+                            <td>{s.name}</td>
+                            <td style={{ fontFamily: "monospace" }}>{s.value}{s.unit ? ` ${s.unit}` : ""}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <p style={{ color: "#9ca3af" }}>(no signals defined for this message)</p>
+                  )}
+                </div>
+              )}
               {bitLayout && (
                 <div style={{ marginTop: 8, fontSize: 12 }}>
                   <p style={{ margin: "0 0 4px", color: "#9ca3af" }}>

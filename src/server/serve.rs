@@ -215,6 +215,12 @@ fn dispatch(state: &Arc<Mutex<ServerState>>, text: &str) -> ServerMsg {
                 message: e.to_string(),
             },
         },
+        ClientMsg::DecodeFrame { dbc, id, data } => match decode_frame(&dbc, id, &data) {
+            Ok(rep) => rep,
+            Err(e) => ServerMsg::Error {
+                message: e.to_string(),
+            },
+        },
         ClientMsg::InjectFault {
             sender,
             id,
@@ -583,6 +589,24 @@ fn inspect_frame(
         stuffBits: layout.stuff_bits,
         wireBits: layout.wire.len(),
         wire: crate::can::bit::to_bit_string(&layout.wire),
+    })
+}
+
+/// Decode one payload with a DBC file (stateless — needs no session).
+/// The file parses on every request (DBC files are small); every parse
+/// or decode failure is an actionable `Error`, never a silent misread.
+fn decode_frame(dbc: &str, id: u32, data: &[u8]) -> Result<ServerMsg, String> {
+    use crate::dbc::Dbc;
+    let db = Dbc::load_from_file(std::path::Path::new(dbc)).map_err(|e| e.to_string())?;
+    let signals = db.decode(id, data).map_err(|e| e.to_string())?;
+    let msg = db.message(id).map_err(|e| e.to_string())?;
+    Ok(ServerMsg::DecodedSignals {
+        idHex: format!("{id:#X}"),
+        message: msg.name.clone(),
+        signals: signals
+            .into_iter()
+            .map(|(name, value, unit)| super::proto::DecodedSignal { name, value, unit })
+            .collect(),
     })
 }
 

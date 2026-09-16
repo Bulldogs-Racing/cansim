@@ -425,6 +425,31 @@ fn ws_inspect_frame_describes_layout_without_project() {
 }
 
 #[test]
+fn ws_decode_frame_uses_dbc_file() {
+    // Stateless: no Load needed. Fixture DBC ships in examples/.
+    let port = serve_ephemeral(Arc::new(Mutex::new(ServerState::new(1))));
+    let (mut ws, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}")).unwrap();
+
+    let req = serde_json::json!({"type": "DecodeFrame", "dbc": "examples/vehicle.dbc", "id": 256, "data": [0, 16, 80, 10, 0, 0, 0, 0]}).to_string();
+    let rep = rpc(&mut ws, &req);
+    assert_eq!(rep["type"], "DecodedSignals", "{rep}");
+    assert_eq!(rep["message"], "EngineData");
+    let signals = rep["signals"].as_array().unwrap();
+    let rpm = signals.iter().find(|s| s["name"] == "Rpm").unwrap();
+    assert_eq!(rpm["value"], 512.0);
+    assert_eq!(rpm["unit"], "rpm");
+
+    // Missing files, unknown ids, and short payloads are Error replies.
+    let req = serde_json::json!({"type": "DecodeFrame", "dbc": "nope.dbc", "id": 256, "data": [0]})
+        .to_string();
+    assert_eq!(rpc(&mut ws, &req)["type"], "Error");
+    let req = serde_json::json!({"type": "DecodeFrame", "dbc": "examples/vehicle.dbc", "id": 9999, "data": [0, 0, 0, 0, 0, 0, 0, 0]}).to_string();
+    assert_eq!(rpc(&mut ws, &req)["type"], "Error");
+    let req = serde_json::json!({"type": "DecodeFrame", "dbc": "examples/vehicle.dbc", "id": 256, "data": [0]}).to_string();
+    assert_eq!(rpc(&mut ws, &req)["type"], "Error");
+}
+
+#[test]
 fn ws_fault_crud_applies() {
     let dir = std::env::temp_dir().join(format!("canlab-ws-faults-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

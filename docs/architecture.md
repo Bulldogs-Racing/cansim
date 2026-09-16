@@ -67,6 +67,7 @@ docs/             user + developer documentation
 - [x] Phase 5 (slice 1) — serve API + canvas view + run controls + analyzer
 - [ ] Phase 4 (interactive part) — Renode supervision over WS + debugger integration
 - [x] Phase 5 (slice 2) — topology editing: palette, drag-and-drop, save
+- [x] Phase 5 (slice 4) — editor polish: duplicate-node, snap-to-grid toggle (`docs/contributing.md` pointer closes the §57 list)
 - [x] Phase 5 (slice 3) — scripted-messages editor (add/update/remove over WS + panel, incl. in-place edit UI)
 - [x] Phase 6 (slice 1) — analyzer depth: TX/RX filter, pause/clear capture, CSV+JSON export (view-local, no protocol change)
 - [x] Phase 6 (slice 2) — analyzer sorting (newest/oldest) + structured ID filter (exact/range/mask, harness-verified) + ARB loss rows backed by the live `Arbitrate` round (§34: ⚔ button arbitrates the scripted messages; winner/losers/receivers in the outcome line)

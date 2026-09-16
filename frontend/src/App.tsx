@@ -83,6 +83,7 @@ export default function App(): JSX.Element {
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
   const [flowEdges, setFlowEdges] = useState<Edge[]>([]);
   const [canvasSel, setCanvasSel] = useState<string | null>(null);
+  const [snapGrid, setSnapGrid] = useState(false);
   const [rows, setRows] = useState<AnalyzerRow[]>([]);
   const [filter, setFilter] = useState("");
   const [idFilterText, setIdFilterText] = useState("");
@@ -423,6 +424,31 @@ export default function App(): JSX.Element {
     else void editCmd("RemoveNode", { type: "RemoveNode", id: parsed.name });
   }, [editCmd]);
 
+  /** Duplicate a node under a fresh id (same device/bus/firmware). Scripted
+   *  messages and fault policies still name the original — re-point them
+   *  explicitly if the copy should send instead. */
+  const duplicateFlowNode = useCallback((flowId: string) => {
+    const parsed = parseFlowId(flowId);
+    if (!parsed || parsed.kind !== "node") {
+      showError("Duplicate: select a node first (buses duplicate by Add, not copy)");
+      return;
+    }
+    const decl = nodes.find((n) => n.id === parsed.name);
+    if (!decl) {
+      showError(`Duplicate: unknown node "${parsed.name}"`);
+      return;
+    }
+    const next: NodeDecl = {
+      id: nextId("node", nodes.map((n) => n.id)),
+      device: decl.device,
+      backend: decl.backend,
+      firmware: decl.firmware ?? null,
+      can: { bus: decl.can.bus },
+      peripherals: decl.peripherals ?? [],
+    };
+    void editCmd("AddNode", { type: "AddNode", node: next });
+  }, [editCmd, nodes, showError]);
+
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     const removed = changes.filter((c) => c.type === "remove");
     if (removed.length > 0) {
@@ -640,6 +666,9 @@ export default function App(): JSX.Element {
           {KNOWN_DEVICES.map((d) => (
             <button key={d} style={btn} onClick={() => addNode(d)}>＋ {d}</button>
           ))}
+          <label style={{ fontSize: 13 }}>
+            <input type="checkbox" checked={snapGrid} onChange={(e) => setSnapGrid(e.target.checked)} /> snap to grid
+          </label>
         </section>
       )}
 
@@ -660,6 +689,8 @@ export default function App(): JSX.Element {
               onNodeClick={(_, n) => setCanvasSel(n.id)}
               onPaneClick={() => setCanvasSel(null)}
               deleteKeyCode={["Backspace", "Delete"]}
+              snapToGrid={snapGrid}
+              snapGrid={[16, 16]}
               fitView
             >
               <Background />
@@ -678,6 +709,7 @@ export default function App(): JSX.Element {
               disabled={disabledNodes.includes(selNode.id)}
               onApply={(next) => editCmd("Update", { type: "UpdateNode", id: selNode.id, node: next })}
               onDelete={() => removeFlowNode(`node:${selNode.id}`)}
+              onDuplicate={() => duplicateFlowNode(`node:${selNode.id}`)}
               onToggleEnabled={() => {
                 const id = selNode.id;
                 if (disabledNodes.includes(id)) void runCmd("EnableNode", { type: "EnableNode", id });
@@ -1265,12 +1297,13 @@ function FaultPoliciesPanel({ faults, nodes, onAdd, onRemove }: {
   );
 }
 
-function NodeProps({ node, buses, disabled, onApply, onDelete, onToggleEnabled }: {
+function NodeProps({ node, buses, disabled, onApply, onDelete, onDuplicate, onToggleEnabled }: {
   node: ProjectNode;
   buses: ProjectBus[];
   disabled: boolean;
   onApply: (next: NodeDecl) => void;
   onDelete: () => void;
+  onDuplicate: () => void;
   onToggleEnabled: () => void;
 }): JSX.Element {
   const [device, setDevice] = useState(node.device);
@@ -1303,6 +1336,7 @@ function NodeProps({ node, buses, disabled, onApply, onDelete, onToggleEnabled }
         peripherals: node.peripherals ?? [],
       })}>Apply</button>
       <button style={{ ...btn, borderColor: "#7f1d1d" }} onClick={onDelete}>Delete node</button>
+      <button style={btn} title="Copy this node under a fresh id (messages/policies keep naming the original)" onClick={onDuplicate}>Duplicate node</button>
       <button style={btn} title="Runtime-only: disabled nodes neither drive nor receive; reset re-enables" onClick={onToggleEnabled}>{disabled ? "Enable node" : "Disable node"}</button>
     </div>
   );

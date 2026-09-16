@@ -343,7 +343,7 @@ export const PCAP_DLT_CAN_SOCKETCAN = 227;
 const CAN_EFF_FLAG = 0x80000000;
 const CAN_RTR_FLAG = 0x40000000;
 
-export function rowsToPcap(rows: AnalyzerRow[]): Uint8Array {
+export function rowsToPcap(rows: AnalyzerRow[]): Uint8Array<ArrayBuffer> {
   const out: number[] = [];
   const le32 = (n: number) => {
     out.push(n & 0xff, (n >>> 8) & 0xff, (n >>> 16) & 0xff, (n >>> 24) & 0xff);

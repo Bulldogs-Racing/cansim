@@ -617,7 +617,7 @@ export default function App(): JSX.Element {
       )}
 
       {connected && flowNodes.length > 0 && (
-        <FaultsPanel
+        <FaultPoliciesPanel
           key={`faultpolicies:${nodes.map((n) => n.id).join(",")}`}
           faults={faults}
           nodes={nodes}

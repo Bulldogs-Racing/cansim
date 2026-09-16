@@ -440,3 +440,27 @@ export function rowsToPcap(rows: AnalyzerRow[]): Uint8Array<ArrayBuffer> {
   }
   return new Uint8Array(out);
 }
+
+/** Fixed tail of every transmitted wire: CRC delimiter + ACK slot +
+ *  ACK delimiter + EOF(7). Always the last 10 wire bits. */
+export const WAVEFORM_TAIL_BITS = 10;
+
+export interface WaveformBand {
+  name: "SOF" | "Stuffed" | "Tail";
+  start: number;
+  len: number;
+}
+
+/** Band split of a transmitted wire for the inspector waveform strip
+ *  (Phase 10, slice 1): SOF cell, the stuffed SOF..CRC middle, and the
+ *  fixed tail. Per-region stuffed offsets are NOT recoverable from the
+ *  wire alone (stuffing runs cross region boundaries), so the middle
+ *  stays one band. Pure (no DOM) for harness testing. */
+export function waveformBands(wireBits: number): WaveformBand[] {
+  if (!Number.isInteger(wireBits) || wireBits < 1 + WAVEFORM_TAIL_BITS) return [];
+  return [
+    { name: "SOF", start: 0, len: 1 },
+    { name: "Stuffed", start: 1, len: wireBits - 1 - WAVEFORM_TAIL_BITS },
+    { name: "Tail", start: wireBits - WAVEFORM_TAIL_BITS, len: WAVEFORM_TAIL_BITS },
+  ];
+}

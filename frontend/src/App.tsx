@@ -25,6 +25,7 @@ import {
   rowsToPcap,
   DecodedSignal,
   FrameBits,
+  waveformBands,
   ProjectBus,
   ProjectNode,
   RenodeJob,
@@ -852,7 +853,8 @@ export default function App(): JSX.Element {
                   <p style={{ margin: "0 0 4px", color: "#9ca3af" }}>
                     {bitLayout.wireBits} wire bits · {bitLayout.stuffBits} stuff bits · CRC {bitLayout.crcHex}
                   </p>
-                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <WaveformStrip wire={bitLayout.wire} />
+                  <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 4 }}>
                     <thead>
                       <tr style={{ textAlign: "left", color: "#9ca3af" }}>
                         <th>Field</th><th>Bits</th>
@@ -877,6 +879,30 @@ export default function App(): JSX.Element {
         </div>
       </section>
     </main>
+  );
+}
+
+/** Waveform strip of one transmitted wire (Phase 10, slice 1): one cell
+ *  per bit, dominant low + bright, recessive high + dim, with SOF and
+ *  fixed-tail band tints. Pure render of the wire string — no interaction,
+ *  no eyes-required layout (horizontal scroll for long frames). */
+function WaveformStrip({ wire }: { wire: string }): JSX.Element {
+  const bands = waveformBands(wire.length);
+  const tail = bands.find((b) => b.name === "Tail");
+  const H = 18;
+  return (
+    <div>
+      <svg viewBox={`0 0 ${wire.length} ${H}`} style={{ width: "100%", height: 44 }} role="img" aria-label={`CAN wire waveform, ${wire.length} bits SOF to EOF`}>
+        {tail && <rect x={tail.start} y={0} width={tail.len} height={H} fill="#713f12" opacity={0.45} />}
+        <rect x={0} y={0} width={1} height={H} fill="#1d4ed8" opacity={0.45} />
+        {wire.split("").map((b, i) => (
+          <rect key={i} x={i + 0.05} y={b === "0" ? H / 2 : 0} width={0.9} height={H / 2} fill={b === "0" ? "#38bdf8" : "#334155"} />
+        ))}
+      </svg>
+      <p style={{ margin: "2px 0 0", color: "#9ca3af", fontSize: 11 }}>
+        ■ SOF&ensp;■ stuffed SOF..CRC&ensp;■ fixed tail (CRC delim + ACK + EOF)
+      </p>
+    </div>
   );
 }
 

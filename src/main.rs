@@ -76,11 +76,16 @@ enum Commands {
     Replay {
         /// Project file (routing: buses + nodes for the recorded senders).
         project: PathBuf,
-        /// Event-log JSON from `canlab simulate --export-json`.
+        /// Event-log JSON from `canlab simulate --export-json`, or a
+        /// SocketCAN pcap (same link type the GUI exports).
         trace: PathBuf,
         /// Write the replayed event log as JSON to this path.
         #[arg(long)]
         export_json: Option<PathBuf>,
+        /// Attribute every pcap packet to this node (required for pcap
+        /// traces, which carry no sender; ignored for JSON traces).
+        #[arg(long = "as")]
+        as_node: Option<String>,
     },
     /// Serve the local WebSocket API for the visual editor.
     Serve {
@@ -116,7 +121,8 @@ fn main() {
             project,
             trace,
             export_json,
-        } => cmd_replay(&project, &trace, export_json.as_deref()),
+            as_node,
+        } => cmd_replay(&project, &trace, export_json.as_deref(), as_node.as_deref()),
         Commands::Serve {
             port,
             project,
@@ -413,7 +419,12 @@ fn cmd_simulate_virtual(proj: &Project, export_json: Option<&Path>) -> i32 {
 /// engine on the given (virtual-only) project. The trace format is the
 /// `--export-json` event log; RX deliveries and lifecycle markers are
 /// derived, not replayed.
-fn cmd_replay(project: &Path, trace: &Path, export_json: Option<&Path>) -> i32 {
+fn cmd_replay(
+    project: &Path,
+    trace: &Path,
+    export_json: Option<&Path>,
+    as_node: Option<&str>,
+) -> i32 {
     let proj = match load_and_validate(project) {
         Some(p) => p,
         None => return 1,
@@ -428,24 +439,61 @@ fn cmd_replay(project: &Path, trace: &Path, export_json: Option<&Path>) -> i32 {
         );
         return 1;
     }
-    let text = match std::fs::read_to_string(trace) {
-        Ok(t) => t,
+    let raw = match std::fs::read(trace) {
+        Ok(b) => b,
         Err(e) => {
             eprintln!("failed to read trace {}: {e}", trace.display());
             return 1;
         }
     };
-    let events: Vec<SimEvent> = match serde_json::from_str(&text) {
-        Ok(e) => e,
-        Err(e) => {
+    // Format by magic bytes, not extension: pcap captures (which carry no
+    // sender) replay every packet as `--as`; JSON event logs carry senders.
+    let script = if cansimcan::pcap::looks_like_pcap(&raw) {
+        let Some(node) = as_node else {
             eprintln!(
-                "failed to parse trace {}: expected event-log JSON from `canlab simulate --export-json` ({e})",
+                "trace {} is a pcap capture, which carries no sender names.\n\
+                 Fix: rerun with --as <node> to attribute every packet (e.g. --as engine_ecu).",
                 trace.display()
             );
             return 1;
+        };
+        if !proj.nodes.iter().any(|n| n.id == node) {
+            eprintln!("unknown --as node \"{node}\" (project nodes must exist to route through)");
+            return 1;
         }
+        match cansimcan::pcap::parse_socketcan_pcap(&raw) {
+            Ok(frames) => frames
+                .into_iter()
+                .map(|f| (node.to_string(), f.frame, None))
+                .collect(),
+            Err(e) => {
+                eprintln!("failed to parse pcap trace {}: {e}", trace.display());
+                return 1;
+            }
+        }
+    } else {
+        let text = match String::from_utf8(raw) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!(
+                    "failed to read trace {}: not UTF-8 JSON ({e})",
+                    trace.display()
+                );
+                return 1;
+            }
+        };
+        let events: Vec<SimEvent> = match serde_json::from_str(&text) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!(
+                    "failed to parse trace {}: expected event-log JSON from `canlab simulate --export-json` ({e})",
+                    trace.display()
+                );
+                return 1;
+            }
+        };
+        extract_replay_script(&events)
     };
-    let script = extract_replay_script(&events);
     if script.is_empty() {
         println!(
             "Trace {} holds no transmitted frames — nothing to replay.",

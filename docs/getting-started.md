@@ -145,6 +145,14 @@ exact traffic while you inspect it. (Fault policies stay off during
 replay; recorded drops re-drive exactly, transmitted-yet-errored frames
 replay clean — see `docs/fault-injection.md`.)
 
+PCAP captures replay too (same SocketCAN link type the GUI exports;
+detected by magic bytes, not extension). Captures carry no sender, so
+attribute every packet explicitly:
+
+```bash
+cargo run -q --bin canlab -- replay examples/two_nodes.canlab.yaml trace.pcap --as engine_ecu
+```
+
 ## Fault-policy runs
 
 ```bash

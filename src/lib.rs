@@ -14,6 +14,7 @@ pub mod backends;
 pub mod can;
 pub mod dbc;
 pub mod package;
+pub mod pcap;
 pub mod project;
 pub mod server;
 pub mod simulation;

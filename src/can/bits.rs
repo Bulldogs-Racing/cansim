@@ -350,11 +350,128 @@ pub fn decode_frame(wire: &[Bit]) -> Result<(CanFrame, DecodeInfo), DecodeError>
     ))
 }
 
+/// One named region of the unstuffed frame (`SOF … CRC sequence`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameRegion {
+    /// `SOF`, `Arbitration`, `Control`, `Data`, or `CRC`.
+    pub name: &'static str,
+    /// Offset in unstuffed bits from SOF.
+    pub offset: usize,
+    pub bits: Vec<Bit>,
+}
+
+/// Bit-level layout of a frame (Phase 10, slice 1): named unstuffed
+/// regions plus the full transmitted wire `SOF … EOF` for future waveform
+/// rendering. Boundaries mirror [`encode_frame`] exactly — SOF(1), then
+/// arbitration (14 standard / 34 extended), control DLC(4), data, CRC(15);
+/// the fixed tail (CRC delimiter, ACK slot, ACK delimiter, EOF) is not
+/// stuffed and not regioned, but included in [`FrameLayout::wire`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameLayout {
+    pub regions: Vec<FrameRegion>,
+    pub crc: u16,
+    pub stuff_bits: usize,
+    pub wire: Vec<Bit>,
+}
+
+pub fn describe_frame(frame: &CanFrame) -> FrameLayout {
+    let enc = encode_frame(frame);
+    let arb_len = match frame.id {
+        CanId::Standard(_) => 11 + 1 + 1 + 1,
+        CanId::Extended(_) => 11 + 1 + 1 + 18 + 1 + 1 + 1,
+    };
+    let data_len = enc.protected.len() - (1 + arb_len + 4);
+    let mut regions = Vec::with_capacity(5);
+    let mut at = 0;
+    let mut take = |name: &'static str, len: usize| {
+        let bits = enc.protected[at..at + len].to_vec();
+        regions.push(FrameRegion {
+            name,
+            offset: at,
+            bits,
+        });
+        at += len;
+    };
+    take("SOF", 1);
+    take("Arbitration", arb_len);
+    take("Control", 4);
+    take("Data", data_len);
+    debug_assert_eq!(at, enc.protected.len());
+    regions.push(FrameRegion {
+        name: "CRC",
+        offset: at,
+        bits: crc_to_bits(enc.crc),
+    });
+    FrameLayout {
+        regions,
+        crc: enc.crc,
+        stuff_bits: enc.stuff_bits,
+        wire: enc.wire,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::can::bit::to_bit_string;
     use Bit::*;
+
+    #[test]
+    fn describe_splits_known_layouts() {
+        // Region geometry on an 8-byte standard frame.
+        let big = CanFrame::new(CanId::new_standard(0x123).unwrap(), &[0; 8]).unwrap();
+        let layout = describe_frame(&big);
+        let lens: Vec<(&str, usize)> = layout
+            .regions
+            .iter()
+            .map(|r| (r.name, r.bits.len()))
+            .collect();
+        assert_eq!(
+            lens,
+            vec![
+                ("SOF", 1),
+                ("Arbitration", 14),
+                ("Control", 4),
+                ("Data", 64),
+                ("CRC", 15),
+            ]
+        );
+        assert_eq!(layout.regions[0].offset, 0);
+        assert_eq!(layout.regions[4].offset, 1 + 14 + 4 + 64);
+        // Wire consistency: stuffed protected+CRC, then the fixed tail
+        // (CRC delimiter, ACK slot, ACK delimiter, EOF).
+        assert_eq!(
+            layout.wire.len(),
+            layout.regions.iter().map(|r| r.bits.len()).sum::<usize>()
+                + layout.stuff_bits
+                + 1
+                + 1
+                + 1
+                + EOF_LEN
+        );
+        assert_eq!(to_bit_string(&layout.wire[..1]), "0"); // SOF dominant
+                                                           // The established hand-checkable vector (19 zero bits → CRC 0)
+                                                           // describes to the same CRC the encoder emits.
+        let zero = std_frame(0x000, &[]);
+        let layout = describe_frame(&zero);
+        assert_eq!(layout.crc, 0x0000);
+        assert_eq!(layout.regions[3].bits.len(), 0);
+        assert_eq!(layout.regions[4].offset, 1 + 14 + 4);
+        // Layout CRC agrees with an independent decode of the wire.
+        let (decoded, info) = decode_frame(&layout.wire).unwrap();
+        assert_eq!(decoded, zero);
+        assert_eq!(info.crc, layout.crc);
+
+        // Extended frame: 34-bit arbitration; remote frame: empty data.
+        let ext = CanFrame::new(CanId::new_extended(0x1ABCDE).unwrap(), &[1, 2]).unwrap();
+        let layout = describe_frame(&ext);
+        assert_eq!(layout.regions[1].bits.len(), 34);
+        assert_eq!(layout.regions[3].bits.len(), 16);
+        let rtr = CanFrame::new_remote(CanId::new_standard(0x200).unwrap(), 4).unwrap();
+        let layout = describe_frame(&rtr);
+        assert_eq!(layout.regions[3].bits.len(), 0);
+        assert_eq!(layout.regions[4].offset, 1 + 14 + 4);
+    }
 
     fn std_frame(id: u16, data: &[u8]) -> CanFrame {
         CanFrame::new(CanId::new_standard(id).unwrap(), data).unwrap()

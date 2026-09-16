@@ -16,6 +16,7 @@ export type ClientMsg =
   | { type: "Step"; deltaNs: number }
   | { type: "Inject"; sender: string; id: number; extended?: boolean; data?: number[] }
   | { type: "Arbitrate"; frames: ArbitrateFrame[] }
+  | { type: "InspectFrame"; id: number; extended?: boolean; data?: number[]; remote?: boolean; dlc?: number }
   | { type: "InjectFault"; sender: string; id: number; extended?: boolean; data?: number[]; fault: WireFault }
   | { type: "GetEvents"; sinceSeq?: number }
   | { type: "GetStatus" }
@@ -44,6 +45,26 @@ export type ClientMsg =
 
 /** Wire shape of WireFault (externally-tagged Rust enum, Phase 9). */
 export type WireFault = { FlipBit: number } | "CorruptCrc" | "DropFrame";
+
+/** One named bit-region of an inspected frame. */
+export interface BitRegion {
+  name: string;
+  offset: number;
+  bits: string;
+}
+
+/** Bit-level layout of one frame (mirror of FrameBits). */
+export interface FrameBits {
+  idHex: string;
+  extended: boolean;
+  dlc: number;
+  remote: boolean;
+  regions: BitRegion[];
+  crcHex: string;
+  stuffBits: number;
+  wireBits: number;
+  wire: string;
+}
 
 /** One contender in an Arbitrate round (mirror of ArbitrateFrame). */
 export interface ArbitrateFrame {
@@ -194,6 +215,7 @@ export type ServerMsg =
   | { type: "RenodeJob"; job: RenodeJob }
   | { type: "RenodeJobList"; jobs: RenodeJob[] }
   | { type: "RenodeLog"; jobId: number; total: number; lines: UartLine[] }
+  | { type: "FrameBits"; idHex: string; extended: boolean; dlc: number; remote: boolean; regions: BitRegion[]; crcHex: string; stuffBits: number; wireBits: number; wire: string }
   | { type: "TraceImported"; transmitted: number; received: number; nextSeq: number }
   | { type: "Pong" }
   | { type: "Error"; message: string };
@@ -317,6 +339,8 @@ export interface AnalyzerRow {
   dir: "TX" | "RX" | "DROP" | "ARB";
   node: string;
   id: string;
+  /** True for 29-bit extended identifiers. */
+  extended: boolean;
   dlc: number;
   data: string;
   /** Remote (RTR) frames carry no payload; dlc is the requested length. */
@@ -343,18 +367,18 @@ export function analyzerRows(events: SeqEvent[]): AnalyzerRow[] {
     if (!inner || typeof inner !== "object") continue;
     if ("FrameTransmitted" in inner) {
       const { sender, frame } = inner.FrameTransmitted;
-      rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "TX", node: sender, id: idToHex(frame.id), dlc: frame.dlc, data: bytesToHex(frame.data), remote: frame.is_remote });
+      rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "TX", node: sender, id: idToHex(frame.id), extended: "Extended" in frame.id, dlc: frame.dlc, data: bytesToHex(frame.data), remote: frame.is_remote });
     } else if ("FrameReceived" in inner) {
       const { receiver, frame } = inner.FrameReceived;
-      rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "RX", node: receiver, id: idToHex(frame.id), dlc: frame.dlc, data: bytesToHex(frame.data), remote: frame.is_remote });
+      rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "RX", node: receiver, id: idToHex(frame.id), extended: "Extended" in frame.id, dlc: frame.dlc, data: bytesToHex(frame.data), remote: frame.is_remote });
     } else if ("FrameDropped" in inner) {
       const { sender, frame } = inner.FrameDropped;
-      rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "DROP", node: sender, id: idToHex(frame.id), dlc: frame.dlc, data: bytesToHex(frame.data), remote: frame.is_remote });
+      rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "DROP", node: sender, id: idToHex(frame.id), extended: "Extended" in frame.id, dlc: frame.dlc, data: bytesToHex(frame.data), remote: frame.is_remote });
     } else if ("ArbitrationLost" in inner) {
       const { node, winner } = inner.ArbitrationLost;
       const frame = txBySenderTime.get(`${e.timeNs}:${winner}`);
       if (!frame) continue; // defensive: winner TX always shares the instant
-      rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "ARB", node, id: idToHex(frame.id), dlc: frame.dlc, data: bytesToHex(frame.data), remote: frame.is_remote });
+      rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "ARB", node, id: idToHex(frame.id), extended: "Extended" in frame.id, dlc: frame.dlc, data: bytesToHex(frame.data), remote: frame.is_remote });
     }
   }
   return rows;

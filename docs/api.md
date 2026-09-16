@@ -27,6 +27,7 @@ canlab serve --port 21011 [--project <file>]
 | `Step { deltaNs }` | `Stepped { nowNs, nextSeq }` | Advance simulated time without traffic. |
 | `Inject { sender, id, extended?, data? }` | `Injected { receivers, nextSeq }` | One ad-hoc frame now. |
 | `Arbitrate { frames: [{ sender, id, extended?, data? }] }` | `Arbitrated { winner, winnerId, winnerExtended, losers, receivers, nextSeq }` | One simultaneous round (§34): lowest ID wins, losers get ARB analyzer rows. All contenders on one bus; fault policies never draw here. |
+| `InspectFrame { id, extended?, data?, remote?, dlc? }` | `FrameBits { idHex, extended, dlc, remote, regions, crcHex, stuffBits, wireBits, wire }` | Bit-level layout (§29): named SOF..CRC regions plus full `SOF..EOF` wire. Stateless. |
 | `InjectFault { sender, id, extended?, data?, fault }` | `FaultInjected { error, receivers, nextSeq }` | One deterministically faulted frame now (`fault`: `{"FlipBit": offset}` / `"CorruptCrc"` / `"DropFrame"`). `error` names the detection (`Bit`/`Stuff`/`Crc`/`Form`/`Ack`) or null. See `docs/fault-injection.md`. |
 | `GetEvents { sinceSeq? }` | `Events { events, nextSeq }` | Ordered log; `seq` is the index. The analyzer polls this (~500 ms) and appends rows into a capped ring buffer. |
 | `GetStatus` | `Status` | state, projectPath, buses, nodes, nextSeq, dirty. |

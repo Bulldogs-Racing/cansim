@@ -383,6 +383,48 @@ fn ws_arbitrate_names_winner_and_losers() {
 }
 
 #[test]
+fn ws_inspect_frame_describes_layout_without_project() {
+    // Stateless: no Load needed.
+    let port = serve_ephemeral(Arc::new(Mutex::new(ServerState::new(1))));
+    let (mut ws, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}")).unwrap();
+
+    let rep = rpc(
+        &mut ws,
+        r#"{"type":"InspectFrame","id":291,"data":[1,2,3,4]}"#,
+    );
+    assert_eq!(rep["type"], "FrameBits", "{rep}");
+    assert_eq!(rep["idHex"], "0x123");
+    assert_eq!(rep["dlc"], 4);
+    let names: Vec<&str> = rep["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["SOF", "Arbitration", "Control", "Data", "CRC"]);
+    assert!(
+        rep["wireBits"].as_u64().unwrap()
+            > rep["regions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["bits"].as_str().unwrap().len() as u64)
+                .sum::<u64>()
+    );
+    assert!(rep["wire"].as_str().unwrap().starts_with('0')); // SOF dominant
+
+    // Remote frames and bad ids.
+    let rep = rpc(
+        &mut ws,
+        r#"{"type":"InspectFrame","id":512,"remote":true,"dlc":4}"#,
+    );
+    assert_eq!(rep["type"], "FrameBits");
+    assert_eq!(rep["dlc"], 4);
+    let err = rpc(&mut ws, r#"{"type":"InspectFrame","id":2048,"data":[]}"#);
+    assert_eq!(err["type"], "Error");
+}
+
+#[test]
 fn ws_fault_crud_applies() {
     let dir = std::env::temp_dir().join(format!("canlab-ws-faults-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

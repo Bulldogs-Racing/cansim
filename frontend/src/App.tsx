@@ -23,6 +23,7 @@ import {
   NodeDecl,
   parseIdFilter,
   rowsToPcap,
+  FrameBits,
   ProjectBus,
   ProjectNode,
   RenodeJob,
@@ -93,6 +94,7 @@ export default function App(): JSX.Element {
   const [logLines, setLogLines] = useState<UartLine[]>([]);
   const [logTotal, setLogTotal] = useState(0);
   const [selected, setSelected] = useState<AnalyzerRow | null>(null);
+  const [bitLayout, setBitLayout] = useState<FrameBits | null>(null);
   const [summary, setSummary] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -293,6 +295,7 @@ export default function App(): JSX.Element {
       }
       setRows([]);
       setSelected(null);
+      setBitLayout(null);
       await refreshProject(api);
     } catch (e) {
       showError(e instanceof Error ? e.message : String(e));
@@ -474,6 +477,7 @@ export default function App(): JSX.Element {
     // every new event still streams in.
     setRows([]);
     setSelected(null);
+    setBitLayout(null);
   }, []);
 
   const exportCsv = useCallback(() => {
@@ -505,6 +509,32 @@ export default function App(): JSX.Element {
     a.click();
     URL.revokeObjectURL(url);
   }, [rows]);
+
+  /** Bit-level layout of the selected frame (§29): stateless InspectFrame
+   *  round trip, rendered as a region table below the inspector. */
+  const inspectBits = useCallback(async (row: AnalyzerRow) => {
+    const api = apiRef.current;
+    if (!api) {
+      showError("not connected — press Connect first");
+      return;
+    }
+    setError(null);
+    try {
+      const data = row.data.trim() === "" ? [] : row.data.trim().split(/\s+/).map((b) => Number(`0x${b}`));
+      const reply = await api.request({
+        type: "InspectFrame",
+        id: Number(row.id),
+        extended: row.extended,
+        data,
+        remote: row.remote,
+        dlc: row.dlc,
+      });
+      if (reply.type === "FrameBits") setBitLayout(reply);
+      else if (reply.type === "Error") showError(`InspectFrame: ${reply.message}`);
+    } catch (e) {
+      showError(e instanceof Error ? e.message : String(e));
+    }
+  }, [showError]);
 
   const btn: React.CSSProperties = { padding: "6px 12px", borderRadius: 6, border: "1px solid #374151", background: "#1f2937", color: "#e5e7eb", cursor: "pointer" };
   const selDecl = canvasSel ? parseFlowId(canvasSel) : null;
@@ -731,7 +761,7 @@ export default function App(): JSX.Element {
             </thead>
             <tbody>
               {visibleRows.map((r) => (
-                <tr key={r.seq} onClick={() => setSelected(r)} style={{ cursor: "pointer", background: selected?.seq === r.seq ? "#1e3a8a" : "transparent" }}>
+                <tr key={r.seq} onClick={() => { setSelected(r); setBitLayout(null); }} style={{ cursor: "pointer", background: selected?.seq === r.seq ? "#1e3a8a" : "transparent" }}>
                   <td>{fmtTimeNs(r.timeNs)}</td>
                   <td>{r.dir}</td>
                   <td>{r.node}</td>
@@ -745,8 +775,9 @@ export default function App(): JSX.Element {
           <aside aria-label="frame inspector" style={{ border: "1px solid #1f2937", borderRadius: 8, padding: 10, minHeight: 120 }}>
             <h3 style={{ margin: "0 0 8px", fontSize: 14 }}>Frame inspector</h3>
             {selected ? (
+              <>
               <dl style={{ margin: 0, fontSize: 13 }}>
-                <dt>ID</dt><dd style={{ fontFamily: "monospace" }}>{selected.id}</dd>
+                <dt>ID</dt><dd style={{ fontFamily: "monospace" }}>{selected.id}{selected.extended ? " (extended)" : ""}</dd>
                 <dt>Direction</dt><dd>{selected.dir}</dd>
                 <dt>Node</dt><dd>{selected.node}</dd>
                 <dt>DLC</dt><dd>{selected.dlc}</dd>
@@ -754,6 +785,30 @@ export default function App(): JSX.Element {
                 <dt>Data</dt><dd style={{ fontFamily: "monospace" }}>{selected.data || "(empty)"}</dd>
                 <dt>Timestamp</dt><dd>{fmtTimeNs(selected.timeNs)}</dd>
               </dl>
+              <button style={{ ...btn, marginTop: 8 }} onClick={() => inspectBits(selected)}>Show bit layout</button>
+              {bitLayout && (
+                <div style={{ marginTop: 8, fontSize: 12 }}>
+                  <p style={{ margin: "0 0 4px", color: "#9ca3af" }}>
+                    {bitLayout.wireBits} wire bits · {bitLayout.stuffBits} stuff bits · CRC {bitLayout.crcHex}
+                  </p>
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <thead>
+                      <tr style={{ textAlign: "left", color: "#9ca3af" }}>
+                        <th>Field</th><th>Bits</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {bitLayout.regions.map((g) => (
+                        <tr key={g.name}>
+                          <td>{g.name}</td>
+                          <td style={{ fontFamily: "monospace", wordBreak: "break-all" }}>{g.bits || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              </>
             ) : (
               <p style={{ color: "#9ca3af" }}>Click a frame to inspect it.</p>
             )}

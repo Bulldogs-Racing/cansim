@@ -203,6 +203,18 @@ fn dispatch(state: &Arc<Mutex<ServerState>>, text: &str) -> ServerMsg {
                 message: e.to_string(),
             },
         },
+        ClientMsg::InspectFrame {
+            id,
+            extended,
+            data,
+            remote,
+            dlc,
+        } => match inspect_frame(id, extended, &data, remote, dlc) {
+            Ok(rep) => rep,
+            Err(e) => ServerMsg::Error {
+                message: e.to_string(),
+            },
+        },
         ClientMsg::InjectFault {
             sender,
             id,
@@ -526,6 +538,52 @@ fn arbitrate_frames(
         contenders.push((f.sender.clone(), frame));
     }
     session.arbitrate(&contenders)
+}
+
+/// Describe one frame's bit-level layout (stateless — needs no session).
+/// Same id/DLC validation as `Inject`; remote frames use `dlc` as the
+/// requested length and ignore `data`.
+fn inspect_frame(
+    id: u32,
+    extended: bool,
+    data: &[u8],
+    remote: bool,
+    dlc: u8,
+) -> Result<ServerMsg, super::session::SessionError> {
+    use crate::can::bits::describe_frame;
+    use crate::can::frame::CanFrame;
+    use crate::can::id::CanId;
+    let bad = |e: String| super::session::SessionError::BadFrame(e);
+    let can_id = if extended {
+        CanId::new_extended(id).map_err(|e| bad(e.to_string()))?
+    } else {
+        CanId::new_standard(id as u16).map_err(|e| bad(e.to_string()))?
+    };
+    let frame = if remote {
+        CanFrame::new_remote(can_id, dlc).map_err(|e| bad(e.to_string()))?
+    } else {
+        CanFrame::new(can_id, data).map_err(|e| bad(e.to_string()))?
+    };
+    let layout = describe_frame(&frame);
+    Ok(ServerMsg::FrameBits {
+        idHex: format!("{}", frame.id),
+        extended,
+        dlc: frame.dlc,
+        remote,
+        regions: layout
+            .regions
+            .iter()
+            .map(|r| super::proto::BitRegion {
+                name: r.name.into(),
+                offset: r.offset,
+                bits: crate::can::bit::to_bit_string(&r.bits),
+            })
+            .collect(),
+        crcHex: format!("{:#06X}", layout.crc),
+        stuffBits: layout.stuff_bits,
+        wireBits: layout.wire.len(),
+        wire: crate::can::bit::to_bit_string(&layout.wire),
+    })
 }
 
 fn status_of(s: &Session) -> ServerMsg {

@@ -55,6 +55,21 @@ pub enum ClientMsg {
     Arbitrate {
         frames: Vec<ArbitrateFrame>,
     },
+    /// Describe one frame's bit-level layout (§29): named SOF..CRC regions
+    /// plus the full transmitted wire `SOF..EOF`. Stateless — needs no
+    /// loaded project. `remote` decodes an RTR frame (`dlc` = requested
+    /// length, `data` ignored).
+    InspectFrame {
+        id: u32,
+        #[serde(default)]
+        extended: bool,
+        #[serde(default)]
+        data: Vec<u8>,
+        #[serde(default)]
+        remote: bool,
+        #[serde(default)]
+        dlc: u8,
+    },
     /// Drive one deterministically faulted frame now (Phase 9, single-shot).
     /// `fault` is the [`WireFault`] wire shape: `{"FlipBit": offset}`,
     /// `"CorruptCrc"`, or `"DropFrame"`. Out-of-range offsets are an
@@ -222,6 +237,17 @@ pub enum ServerMsg {
         receivers: usize,
         nextSeq: usize,
     },
+    FrameBits {
+        idHex: String,
+        extended: bool,
+        dlc: u8,
+        remote: bool,
+        regions: Vec<BitRegion>,
+        crcHex: String,
+        stuffBits: usize,
+        wireBits: usize,
+        wire: String,
+    },
     FaultInjected {
         error: Option<CanErrorKind>,
         receivers: usize,
@@ -284,6 +310,14 @@ pub struct ArbitrateFrame {
     pub extended: bool,
     #[serde(default)]
     pub data: Vec<u8>,
+}
+
+/// One named region of an inspected frame (see [`ClientMsg::InspectFrame`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BitRegion {
+    pub name: String,
+    pub offset: usize,
+    pub bits: String,
 }
 
 /// One log entry with its sequence number (index in the session log).
@@ -478,6 +512,34 @@ mod tests {
         let json = serde_json::to_value(&rep).unwrap();
         assert_eq!(json["type"], "Arbitrated");
         assert_eq!(json["winnerId"], 0x100);
+    }
+
+    #[test]
+    fn inspect_frame_round_trip() {
+        for raw in [
+            r#"{"type":"InspectFrame","id":291,"data":[1,2,3,4]}"#,
+            r#"{"type":"InspectFrame","id":512,"remote":true,"dlc":4}"#,
+        ] {
+            assert!(parse_client_msg(raw).is_ok(), "{raw}");
+        }
+        let rep = ServerMsg::FrameBits {
+            idHex: "0x123".into(),
+            extended: false,
+            dlc: 4,
+            remote: false,
+            regions: vec![BitRegion {
+                name: "SOF".into(),
+                offset: 0,
+                bits: "0".into(),
+            }],
+            crcHex: "0x0000".into(),
+            stuffBits: 0,
+            wireBits: 100,
+            wire: "0".repeat(100),
+        };
+        let json = serde_json::to_value(&rep).unwrap();
+        assert_eq!(json["type"], "FrameBits");
+        assert_eq!(json["regions"][0]["name"], "SOF");
     }
 
     #[test]

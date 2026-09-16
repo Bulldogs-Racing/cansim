@@ -84,7 +84,7 @@ export default function App(): JSX.Element {
   const [filter, setFilter] = useState("");
   const [idFilterText, setIdFilterText] = useState("");
   const [newestFirst, setNewestFirst] = useState(false);
-  const [dirFilter, setDirFilter] = useState<"all" | "TX" | "RX" | "DROP">("all");
+  const [dirFilter, setDirFilter] = useState<"all" | "TX" | "RX" | "DROP" | "ARB">("all");
   const [paused, setPaused] = useState(false);
   const [renodePath, setRenodePath] = useState("firmware/tests/stm32_can/two_nodes.canlab.yaml");
   const [runSecsText, setRunSecsText] = useState("30");
@@ -252,6 +252,10 @@ export default function App(): JSX.Element {
         setSummary(`${reply.transmitted} transmitted, ${reply.received} received`);
       } else if (reply.type === "FaultInjected") {
         setSummary(`Fault injected: ${reply.error ?? "decoded clean"} — ${reply.receivers} receiver(s).`);
+      } else if (reply.type === "Arbitrated") {
+        const idHex = `0x${reply.winnerId.toString(16).toUpperCase()}`;
+        const lost = reply.losers.length > 0 ? ` — lost: ${reply.losers.join(", ")}` : " (uncontested)";
+        setSummary(`Arbitration: ${reply.winner} wins ${idHex}${lost} — ${reply.receivers} receiver(s).`);
       }
       // Fetch-then-adopt: Start/Inject/Step append events BEFORE the Status
       // reply is read, so poll with the pre-Status cursor first — adopting
@@ -533,6 +537,13 @@ export default function App(): JSX.Element {
             <button style={btn} onClick={() => runCmd("Stop", { type: "Stop" })}>⏹ Stop</button>
             <button style={btn} onClick={() => runCmd("Reset", { type: "Reset" })}>↻ Reset</button>
             <button style={btn} onClick={() => runCmd("Step", { type: "Step", deltaNs: 238_000 })}>⏭ Step</button>
+            <button style={btn} title="Resolve one simultaneous round from the scripted messages: all transmit at once, lowest ID wins" onClick={() => {
+              if (messages.length === 0) {
+                showError("Arbitrate: add scripted messages first — they become the contenders");
+                return;
+              }
+              void runCmd("Arbitrate", { type: "Arbitrate", frames: messages.map((m) => ({ sender: m.sender, id: m.id, extended: m.extended ?? false, data: m.data })) });
+            }}>⚔ Arbitrate</button>
           </>
         )}
       </header>
@@ -696,11 +707,12 @@ export default function App(): JSX.Element {
           <input aria-label="filter by id or node" placeholder="filter: id or node" style={{ ...btn, cursor: "text" }} value={filter} onChange={(e) => setFilter(e.target.value)} />
           <input aria-label="id filter" title="exact (0x123), range (0x100-0x2FF), or id/mask (0x120/0x7F0)" placeholder="id: 0x123, range, mask" style={{ ...btn, cursor: "text", width: 180 }} value={idFilterText} onChange={(e) => setIdFilterText(e.target.value)} />
           <button style={btn} onClick={() => setNewestFirst((v) => !v)}>{newestFirst ? "⇅ Oldest first" : "⇅ Newest first"}</button>
-          <select aria-label="direction filter" title="TX/RX/DROP direction filter" style={btn} value={dirFilter} onChange={(e) => setDirFilter(e.target.value as "all" | "TX" | "RX" | "DROP")}>
+          <select aria-label="direction filter" title="TX/RX/DROP/ARB direction filter" style={btn} value={dirFilter} onChange={(e) => setDirFilter(e.target.value as "all" | "TX" | "RX" | "DROP" | "ARB")}>
             <option value="all">All</option>
             <option value="TX">TX only</option>
             <option value="RX">RX only</option>
             <option value="DROP">DROP only</option>
+            <option value="ARB">ARB only</option>
           </select>
           <button style={btn} onClick={toggleCapture}>{paused ? "Resume capture" : "Pause capture"}</button>
           <button style={btn} onClick={clearAnalyzer}>Clear</button>

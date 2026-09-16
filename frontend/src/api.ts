@@ -15,6 +15,7 @@ export type ClientMsg =
   | { type: "Reset" }
   | { type: "Step"; deltaNs: number }
   | { type: "Inject"; sender: string; id: number; extended?: boolean; data?: number[] }
+  | { type: "Arbitrate"; frames: ArbitrateFrame[] }
   | { type: "InjectFault"; sender: string; id: number; extended?: boolean; data?: number[]; fault: WireFault }
   | { type: "GetEvents"; sinceSeq?: number }
   | { type: "GetStatus" }
@@ -43,6 +44,14 @@ export type ClientMsg =
 
 /** Wire shape of WireFault (externally-tagged Rust enum, Phase 9). */
 export type WireFault = { FlipBit: number } | "CorruptCrc" | "DropFrame";
+
+/** One contender in an Arbitrate round (mirror of ArbitrateFrame). */
+export interface ArbitrateFrame {
+  sender: string;
+  id: number;
+  extended?: boolean;
+  data?: number[];
+}
 
 /** Detection kind observed on a faulted wire (unit variants). */
 export type CanErrorKind = "Bit" | "Stuff" | "Crc" | "Form" | "Ack";
@@ -179,6 +188,7 @@ export type ServerMsg =
   | { type: "RunSummary"; transmitted: number; received: number; nextSeq: number }
   | { type: "Stepped"; nowNs: number; nextSeq: number }
   | { type: "Injected"; receivers: number; nextSeq: number }
+  | { type: "Arbitrated"; winner: string; winnerId: number; winnerExtended: boolean; losers: string[]; receivers: number; nextSeq: number }
   | { type: "FaultInjected"; error: CanErrorKind | null; receivers: number; nextSeq: number }
   | { type: "RenodeJobStarted"; jobId: number }
   | { type: "RenodeJob"; job: RenodeJob }
@@ -304,7 +314,7 @@ export function fmtTimeNs(ns: number): string {
 export interface AnalyzerRow {
   seq: number;
   timeNs: number;
-  dir: "TX" | "RX" | "DROP";
+  dir: "TX" | "RX" | "DROP" | "ARB";
   node: string;
   id: string;
   dlc: number;
@@ -313,10 +323,19 @@ export interface AnalyzerRow {
   remote: boolean;
 }
 
-/** Extract analyzer rows (TX/RX frame deliveries) from polled events.
+/** Extract analyzer rows (TX/RX/DROP/ARB) from polled events.
  *  Wire nesting is SeqEvent.kind = { BusTraffic: BusEvent } and
- *  BusEvent.kind carries the variant — not the variant directly. */
+ *  BusEvent.kind carries the variant — not the variant directly.
+ *  ARB rows annotate arbitration losses: the loser node plus the winning
+ *  frame (resolved from the winner's TX at the same instant). */
 export function analyzerRows(events: SeqEvent[]): AnalyzerRow[] {
+  const txBySenderTime = new Map<string, WireCanFrame>();
+  for (const e of events) {
+    if (typeof e.kind !== "object" || !("BusTraffic" in e.kind)) continue;
+    const inner = (e.kind.BusTraffic as BusEvent | null)?.kind;
+    if (!inner || typeof inner !== "object" || !("FrameTransmitted" in inner)) continue;
+    txBySenderTime.set(`${e.timeNs}:${inner.FrameTransmitted.sender}`, inner.FrameTransmitted.frame);
+  }
   const rows: AnalyzerRow[] = [];
   for (const e of events) {
     if (typeof e.kind !== "object" || !("BusTraffic" in e.kind)) continue;
@@ -331,6 +350,11 @@ export function analyzerRows(events: SeqEvent[]): AnalyzerRow[] {
     } else if ("FrameDropped" in inner) {
       const { sender, frame } = inner.FrameDropped;
       rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "DROP", node: sender, id: idToHex(frame.id), dlc: frame.dlc, data: bytesToHex(frame.data), remote: frame.is_remote });
+    } else if ("ArbitrationLost" in inner) {
+      const { node, winner } = inner.ArbitrationLost;
+      const frame = txBySenderTime.get(`${e.timeNs}:${winner}`);
+      if (!frame) continue; // defensive: winner TX always shares the instant
+      rows.push({ seq: e.seq, timeNs: e.timeNs, dir: "ARB", node, id: idToHex(frame.id), dlc: frame.dlc, data: bytesToHex(frame.data), remote: frame.is_remote });
     }
   }
   return rows;
@@ -360,6 +384,9 @@ export function rowsToPcap(rows: AnalyzerRow[]): Uint8Array<ArrayBuffer> {
   le32(72); // snaplen
   le32(PCAP_DLT_CAN_SOCKETCAN);
   for (const r of rows) {
+    // ARB rows annotate losses, not wire traffic: the winner's TX already
+    // exports the frame. (DROP rows export as normal frames, by contrast.)
+    if (r.dir === "ARB") continue;
     const idNum = Number(r.id);
     if (!Number.isInteger(idNum) || idNum < 0 || idNum > 0x1fffffff) continue;
     const dataBytes =

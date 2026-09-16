@@ -85,6 +85,7 @@ The GUI is a web app with three parts: a network **canvas**, run/simulation
 | **Pause / Resume** | Halts / continues the simulation |
 | **Stop / Reset** | Ends the run or resets all nodes |
 | **Step** | Advances simulated time without traffic |
+| **⚔ Arbitrate** | Transmits all scripted messages at the same instant — lowest ID wins, losers get ARB rows |
 
 - **Canvas**: buses are shown as blue nodes, MCUs as dark nodes, with
   animated edges for connections.
@@ -104,12 +105,14 @@ The GUI is a web app with three parts: a network **canvas**, run/simulation
   node still referenced here is refused until its rows are deleted.
 - **CAN Analyzer**: streams TX/RX frames as they happen (Time, Dir, Node,
   ID, DLC, Data). Filter by ID/node text, by structured ID (exact
-  `0x123`, range `0x100-0x2FF`, or id/mask `0x120/0x7F0`) plus a TX/RX/DROP
+  `0x123`, range `0x100-0x2FF`, or id/mask `0x120/0x7F0`) plus a TX/RX/DROP/ARB
   direction selector, sort newest/oldest, click a row to inspect the frame
   in the inspector, **Pause capture** to freeze the view (resume picks up
   the backlog), **Clear** to drop rendered rows, and **Export CSV/JSON/PCAP**
   to save the trace (PCAP uses the SocketCAN link type with simulated
-  timestamps). The table is capped at 500 rows.
+  timestamps; ARB annotation rows are skipped there). The table is capped
+  at 500 rows. **⚔ Arbitrate** resolves one simultaneous round from the
+  scripted messages and names the winner, losers, and observers.
 - **Renode firmware runs**: start real STM32F103 firmware in the
   background (project path + run budget), watch jobs poll to done (or
   **Cancel** a runaway), inspect per-job firmware **Log**, then **Import

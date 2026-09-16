@@ -49,6 +49,12 @@ pub enum ClientMsg {
         #[serde(default)]
         data: Vec<u8>,
     },
+    /// Resolve one simultaneous-transmission round (§34): every contender
+    /// transmits at the same simulated instant, lowest ID wins. All
+    /// contenders must sit on one bus; fault policies never draw here.
+    Arbitrate {
+        frames: Vec<ArbitrateFrame>,
+    },
     /// Drive one deterministically faulted frame now (Phase 9, single-shot).
     /// `fault` is the [`WireFault`] wire shape: `{"FlipBit": offset}`,
     /// `"CorruptCrc"`, or `"DropFrame"`. Out-of-range offsets are an
@@ -208,6 +214,14 @@ pub enum ServerMsg {
         receivers: usize,
         nextSeq: usize,
     },
+    Arbitrated {
+        winner: String,
+        winnerId: u32,
+        winnerExtended: bool,
+        losers: Vec<String>,
+        receivers: usize,
+        nextSeq: usize,
+    },
     FaultInjected {
         error: Option<CanErrorKind>,
         receivers: usize,
@@ -258,6 +272,18 @@ pub struct JobInfo {
 pub struct UartLine {
     pub machine: String,
     pub message: String,
+}
+
+/// One contender in an [`ClientMsg::Arbitrate`] round: sender plus a
+/// logical frame (same validation as `Inject`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArbitrateFrame {
+    pub sender: String,
+    pub id: u32,
+    #[serde(default)]
+    pub extended: bool,
+    #[serde(default)]
+    pub data: Vec<u8>,
 }
 
 /// One log entry with its sequence number (index in the session log).
@@ -411,6 +437,47 @@ mod tests {
         ] {
             assert!(parse_client_msg(raw).is_ok(), "{raw}");
         }
+    }
+
+    #[test]
+    fn arbitrate_round_trip() {
+        let req = ClientMsg::Arbitrate {
+            frames: vec![
+                ArbitrateFrame {
+                    sender: "a".into(),
+                    id: 0x300,
+                    extended: false,
+                    data: vec![1],
+                },
+                ArbitrateFrame {
+                    sender: "b".into(),
+                    id: 0x100,
+                    extended: false,
+                    data: vec![2],
+                },
+            ],
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["type"], "Arbitrate");
+        assert_eq!(json["frames"][1]["sender"], "b");
+        let back: ClientMsg = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, ClientMsg::Arbitrate { .. }));
+        // Optional fields default like Inject.
+        let bare: ClientMsg =
+            serde_json::from_str(r#"{"type":"Arbitrate","frames":[{"sender":"a","id":291}]}"#)
+                .unwrap();
+        assert!(matches!(bare, ClientMsg::Arbitrate { .. }));
+        let rep = ServerMsg::Arbitrated {
+            winner: "b".into(),
+            winnerId: 0x100,
+            winnerExtended: false,
+            losers: vec!["a".into()],
+            receivers: 1,
+            nextSeq: 9,
+        };
+        let json = serde_json::to_value(&rep).unwrap();
+        assert_eq!(json["type"], "Arbitrated");
+        assert_eq!(json["winnerId"], 0x100);
     }
 
     #[test]

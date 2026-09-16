@@ -190,6 +190,19 @@ fn dispatch(state: &Arc<Mutex<ServerState>>, text: &str) -> ServerMsg {
                 message: e.to_string(),
             },
         },
+        ClientMsg::Arbitrate { frames } => match arbitrate_frames(&mut s.session, &frames) {
+            Ok(rep) => ServerMsg::Arbitrated {
+                winner: rep.winner,
+                winnerId: rep.winner_id,
+                winnerExtended: rep.winner_extended,
+                losers: rep.losers,
+                receivers: rep.receivers,
+                nextSeq: s.session.events().len(),
+            },
+            Err(e) => ServerMsg::Error {
+                message: e.to_string(),
+            },
+        },
         ClientMsg::InjectFault {
             sender,
             id,
@@ -488,6 +501,31 @@ fn job_info(rec: &JobRecord) -> JobInfo {
         received: rec.received,
         error: rec.error.clone(),
     }
+}
+
+/// Build contender frames for an [`ClientMsg::Arbitrate`] round with the
+/// same validation as `Inject` (id range, DLC) — the session resolves
+/// senders and refuses mixed-bus rounds.
+fn arbitrate_frames(
+    session: &mut Session,
+    frames: &[super::proto::ArbitrateFrame],
+) -> Result<super::session::ArbitrationReport, super::session::SessionError> {
+    use crate::can::frame::CanFrame;
+    use crate::can::id::CanId;
+    let mut contenders = Vec::with_capacity(frames.len());
+    for f in frames {
+        let can_id = if f.extended {
+            CanId::new_extended(f.id)
+                .map_err(|e| super::session::SessionError::BadFrame(e.to_string()))?
+        } else {
+            CanId::new_standard(f.id as u16)
+                .map_err(|e| super::session::SessionError::BadFrame(e.to_string()))?
+        };
+        let frame = CanFrame::new(can_id, &f.data)
+            .map_err(|e| super::session::SessionError::BadFrame(e.to_string()))?;
+        contenders.push((f.sender.clone(), frame));
+    }
+    session.arbitrate(&contenders)
 }
 
 fn status_of(s: &Session) -> ServerMsg {

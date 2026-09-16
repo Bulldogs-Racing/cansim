@@ -324,6 +324,65 @@ fn ws_inject_fault_reports_wire_truth() {
 }
 
 #[test]
+fn ws_arbitrate_names_winner_and_losers() {
+    let dir = std::env::temp_dir().join(format!("canlab-ws-arb-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let proj = dir.join("p.canlab");
+    std::fs::write(&proj, PROJECT).unwrap();
+
+    let port = serve_ephemeral(Arc::new(Mutex::new(ServerState::new(1))));
+    let (mut ws, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}")).unwrap();
+    let req = serde_json::json!({"type": "Load", "path": proj.display().to_string()}).to_string();
+    assert_eq!(rpc(&mut ws, &req)["type"], "Status");
+
+    // engine_ecu (0x300) vs dashboard (0x100): dashboard wins.
+    let rep = rpc(
+        &mut ws,
+        r#"{"type":"Arbitrate","frames":[{"sender":"engine_ecu","id":768,"data":[1]},{"sender":"dashboard","id":256,"data":[2]}]}"#,
+    );
+    assert_eq!(rep["type"], "Arbitrated", "{rep}");
+    assert_eq!(rep["winner"], "dashboard");
+    assert_eq!(rep["winnerId"], 256);
+    assert_eq!(rep["losers"], serde_json::json!(["engine_ecu"]));
+    assert_eq!(rep["receivers"], 1);
+
+    // The round is visible in the event stream: arbitration events plus
+    // the winner's delivery.
+    let events = rpc(&mut ws, r#"{"type":"GetEvents","sinceSeq":0}"#);
+    let text = serde_json::to_string(&events).unwrap();
+    assert!(
+        text.contains("ArbitrationStarted"),
+        "start must reach the stream"
+    );
+    assert!(
+        text.contains("ArbitrationLost"),
+        "loss must reach the stream"
+    );
+    assert!(
+        text.contains("\"Standard\":256"),
+        "winner frame must reach the stream"
+    );
+
+    // Empty rounds, unknown senders, and bad frames are Error replies.
+    assert_eq!(
+        rpc(&mut ws, r#"{"type":"Arbitrate","frames":[]}"#)["type"],
+        "Error"
+    );
+    let err = rpc(
+        &mut ws,
+        r#"{"type":"Arbitrate","frames":[{"sender":"ghost","id":256,"data":[]}]}"#,
+    );
+    assert_eq!(err["type"], "Error");
+    let err = rpc(
+        &mut ws,
+        r#"{"type":"Arbitrate","frames":[{"sender":"engine_ecu","id":2048,"data":[]}]}"#,
+    );
+    assert_eq!(err["type"], "Error");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn ws_fault_crud_applies() {
     let dir = std::env::temp_dir().join(format!("canlab-ws-faults-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

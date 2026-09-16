@@ -8,7 +8,7 @@
 //!
 //! Scope (explicit): virtual-backend projects only. Renode projects are
 //! rejected with [`SessionError::RenodeOverApi`] — firmware runs stay in
-//! `canlab simulate` until WS-supervised emulator runs land.
+//! `canlab simulate` or the background job table, never in this session.
 
 use crate::can::bus::{BusError, CanBusConfig, WireFault};
 use crate::can::errors::CanErrorKind;
@@ -78,6 +78,10 @@ pub enum SessionError {
     },
     #[error("message payload too long ({len} > 8 bytes)")]
     MessagePayloadTooLong { len: usize },
+    #[error("arbitration needs at least one contender — send frames first")]
+    NoContenders,
+    #[error("arbitration needs all contenders on one bus (got: {0}); no cross-bus forwarding")]
+    MixedArbitrationBuses(String),
     #[error("cannot remove node \"{node}\" — still referenced by {count} fault polic(ies); delete them first")]
     NodeHasFaults { node: String, count: usize },
     #[error("unknown fault index {index} (project has {count} fault polic(ies))")]
@@ -111,6 +115,17 @@ impl From<BusError> for SessionError {
 pub struct RunSummary {
     pub transmitted: u64,
     pub received: u64,
+}
+
+/// Summary of one arbitration round (§34): who won, who lost, and how
+/// many nodes observed the winning frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArbitrationReport {
+    pub winner: String,
+    pub winner_id: u32,
+    pub winner_extended: bool,
+    pub losers: Vec<String>,
+    pub receivers: usize,
 }
 
 /// Summary of one faulted ad-hoc frame.
@@ -588,6 +603,55 @@ impl Session {
             CanFrame::new(can_id, data).map_err(|e| SessionError::BadFrame(e.to_string()))?;
         let out = self.engine.transmit(&bus, sender, frame)?;
         Ok(out.receivers.len())
+    }
+
+    /// Resolve one simultaneous-transmission round (§34): every contender
+    /// transmits at the same simulated instant and the lowest ID wins.
+    /// All contenders must sit on one bus (no cross-bus forwarding, so a
+    /// mixed round is an explicit error). All senders resolve first — an
+    /// unknown sender fails the whole round with no partial application.
+    /// Fault policies never draw on arbitration rounds (like explicit
+    /// single-shots); the engine's simultaneous path bypasses them.
+    pub fn arbitrate(
+        &mut self,
+        frames: &[(String, CanFrame)],
+    ) -> Result<ArbitrationReport, SessionError> {
+        let (bus, requests) = {
+            let loaded = self.loaded.as_ref().ok_or(SessionError::NoProject)?;
+            if frames.is_empty() {
+                return Err(SessionError::NoContenders);
+            }
+            let mut bus: Option<String> = None;
+            let mut describe = Vec::new();
+            for (sender, _) in frames {
+                let b = loaded.node_bus.get(sender).cloned().ok_or_else(|| {
+                    SessionError::UnknownNode(sender.clone(), known_nodes(loaded))
+                })?;
+                describe.push(format!("{sender} on {b}"));
+                match &bus {
+                    None => bus = Some(b),
+                    Some(first) if *first != b => {
+                        return Err(SessionError::MixedArbitrationBuses(describe.join(", ")))
+                    }
+                    _ => {}
+                }
+            }
+            let requests: Vec<(String, CanFrame)> =
+                frames.iter().map(|(s, f)| (s.clone(), f.clone())).collect();
+            (bus.expect("non-empty frames have a bus"), requests)
+        };
+        let out = self.engine.transmit_simultaneous(&bus, requests)?;
+        let (winner_id, winner_extended) = match out.winner_frame.id {
+            CanId::Standard(n) => (n as u32, false),
+            CanId::Extended(n) => (n, true),
+        };
+        Ok(ArbitrationReport {
+            winner: out.winner_node,
+            winner_id,
+            winner_extended,
+            losers: out.loser_nodes,
+            receivers: out.receivers.len(),
+        })
     }
 
     /// Outcome of one faulted ad-hoc frame (Phase 9, single-shot).
@@ -1407,6 +1471,77 @@ messages:
             .unwrap_err();
         assert!(matches!(err, SessionError::UnknownNode(_, _)));
         assert_eq!(s.events().len(), after_ok);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn arbitrate_picks_lowest_id_and_names_losers() {
+        use crate::can::frame::CanFrame;
+        use crate::can::id::CanId;
+
+        let frame = |id: u16| CanFrame::new(CanId::new_standard(id).unwrap(), &[id as u8]).unwrap();
+        let mut s = Session::new();
+        assert!(matches!(
+            s.arbitrate(&[("engine_ecu".into(), frame(0x100))]),
+            Err(SessionError::NoProject)
+        ));
+        assert!(matches!(s.arbitrate(&[]), Err(SessionError::NoProject)));
+
+        let dir = tmpdir("arbitrate");
+        let path = write_project(&dir, "p.canlab", TWO_NODES);
+        s.load(&path).unwrap();
+        assert!(matches!(s.arbitrate(&[]), Err(SessionError::NoContenders)));
+
+        // engine_ecu (0x300) vs dashboard (0x100): dashboard wins.
+        let rep = s
+            .arbitrate(&[
+                ("engine_ecu".into(), frame(0x300)),
+                ("dashboard".into(), frame(0x100)),
+            ])
+            .unwrap();
+        assert_eq!(rep.winner, "dashboard");
+        assert_eq!((rep.winner_id, rep.winner_extended), (0x100, false));
+        assert_eq!(rep.losers, vec!["engine_ecu".to_string()]);
+        assert_eq!(rep.receivers, 1);
+
+        // Unknown sender fails the whole round with no partial application.
+        let before = s.events().len();
+        let err = s
+            .arbitrate(&[
+                ("engine_ecu".into(), frame(0x300)),
+                ("ghost".into(), frame(0x100)),
+            ])
+            .unwrap_err();
+        assert!(matches!(err, SessionError::UnknownNode(_, _)));
+        assert_eq!(s.events().len(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn arbitrate_refuses_cross_bus_rounds() {
+        use crate::can::frame::CanFrame;
+        use crate::can::id::CanId;
+
+        const SPLIT: &str = r#"
+version: 1
+simulation: {mode: deterministic}
+buses:
+  - {id: bus_a, type: can, bitrate: 500000, fd: false}
+  - {id: bus_b, type: can, bitrate: 500000, fd: false}
+nodes:
+  - {id: a1, device: stm32f103, backend: virtual, can: {bus: bus_a}}
+  - {id: b1, device: stm32f103, backend: virtual, can: {bus: bus_b}}
+"#;
+        let dir = tmpdir("arbitrate-split");
+        let path = write_project(&dir, "p.canlab", SPLIT);
+        let mut s = Session::new();
+        s.load(&path).unwrap();
+        let frame = CanFrame::new(CanId::new_standard(0x100).unwrap(), &[1]).unwrap();
+        let err = s
+            .arbitrate(&[("a1".into(), frame.clone()), ("b1".into(), frame)])
+            .unwrap_err();
+        assert!(matches!(err, SessionError::MixedArbitrationBuses(_)));
+        assert!(err.to_string().contains("bus_a") && err.to_string().contains("bus_b"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

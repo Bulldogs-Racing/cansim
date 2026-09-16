@@ -461,6 +461,7 @@ mod tests {
                 id: 0x123,
                 data: vec![1, 2],
                 extended: false,
+                source: None,
             },
         };
         let json = serde_json::to_value(&add).unwrap();

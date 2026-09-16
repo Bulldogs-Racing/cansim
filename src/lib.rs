@@ -18,3 +18,4 @@ pub mod pcap;
 pub mod project;
 pub mod server;
 pub mod simulation;
+pub mod sketch;

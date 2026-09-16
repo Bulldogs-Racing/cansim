@@ -1247,6 +1247,7 @@ messages:
             id,
             data: data.to_vec(),
             extended: false,
+            source: None,
         }
     }
 
@@ -1375,6 +1376,7 @@ messages:
                 id: 0x2000_0000,
                 data: vec![],
                 extended: true,
+                source: None,
             }),
             Err(SessionError::MessageIdOutOfRange { .. })
         ));

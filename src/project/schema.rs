@@ -112,6 +112,10 @@ pub struct MessageDecl {
     /// If true, `id` is interpreted as extended 29-bit.
     #[serde(default)]
     pub extended: bool,
+    /// Provenance for sketch-imported rows (`"node.ino:12"`); display-only,
+    /// never affects simulation. Absent on hand-written rows.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 /// One deterministic fault policy: when a normal transmission matches the

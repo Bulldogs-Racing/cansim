@@ -40,6 +40,8 @@ pub enum BusError {
     UnknownNode(String),
     #[error("node \"{0}\" is bus-off and cannot initiate transmission")]
     NodeBusOff(String),
+    #[error("node \"{0}\" is disabled and cannot initiate transmission (re-enable it first)")]
+    NodeDisabled(String),
     #[error("bus name must not be empty")]
     EmptyBusName,
     #[error("bitrate must be positive, got {0}")]
@@ -92,6 +94,12 @@ pub enum BusEventKind {
         node: String,
     },
     NodeReset {
+        node: String,
+    },
+    NodeDisabled {
+        node: String,
+    },
+    NodeEnabled {
         node: String,
     },
     ArbitrationStarted {
@@ -194,6 +202,10 @@ pub struct FaultOutcome {
 #[derive(Debug)]
 struct NodeAttachment {
     confinement: Confinement,
+    /// Operator simulation control (§35 node faults): disabled nodes
+    /// neither drive nor receive, but keep their declaration and error
+    /// counters. Reset re-enables (fresh deterministic start).
+    enabled: bool,
 }
 
 /// A deterministic logical-frame CAN bus with wire-codec delivery and
@@ -238,6 +250,18 @@ impl CanBus {
         self.nodes.contains_key(node)
     }
 
+    /// Currently disabled nodes on this bus, sorted (for status).
+    pub fn disabled_nodes(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .nodes
+            .iter()
+            .filter(|(_, attachment)| !attachment.enabled)
+            .map(|(name, _)| name.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
     /// TEC/REC/state triple for one controller (§12 observability).
     pub fn controller_status(&self, node: &str) -> Result<ControllerStatus, BusError> {
         self.nodes
@@ -254,14 +278,19 @@ impl CanBus {
         self.events.clear();
     }
 
-    /// Forget wire-time tracking (monotonicity baseline). Engine reset
-    /// needs this: the simulation clock returns to 0, so the bus must
-    /// accept t=0 again. Error counters are deliberately untouched —
-    /// this is simulation control, not per-CPU re-init (see `reset_node`).
+    /// Forget wire-time tracking (monotonicity baseline) and re-enable all
+    /// nodes. Engine reset needs both: the simulation clock returns to 0,
+    /// so the bus must accept t=0 again, and operator disables do not
+    /// survive reset (fresh deterministic start, like reseeded fault
+    /// streams). Error counters are deliberately untouched — this is
+    /// simulation control, not per-CPU re-init (see `reset_node`).
     pub fn reset_time(&mut self) {
         self.events.clear();
         self.last_time_ns = 0;
         self.has_time = false;
+        for attachment in self.nodes.values_mut() {
+            attachment.enabled = true;
+        }
     }
 
     pub fn register_node(
@@ -281,6 +310,7 @@ impl CanBus {
             node.clone(),
             NodeAttachment {
                 confinement: Confinement::new(),
+                enabled: true,
             },
         );
         self.events
@@ -320,6 +350,39 @@ impl CanBus {
                 node: node.to_string(),
             },
         ));
+        Ok(())
+    }
+
+    /// Operator enable/disable (§35 node faults): a disabled node neither
+    /// drives nor receives, but stays registered with counters intact.
+    /// Idempotent — re-applying the current state emits no event.
+    pub fn set_node_enabled(
+        &mut self,
+        node: &str,
+        enabled: bool,
+        at_ns: SimNanos,
+    ) -> Result<(), BusError> {
+        let current = self
+            .nodes
+            .get(node)
+            .map(|a| a.enabled)
+            .ok_or_else(|| BusError::UnknownNode(node.to_string()))?;
+        self.check_time(at_ns)?;
+        if current == enabled {
+            return Ok(());
+        }
+        let attachment = self.nodes.get_mut(node).expect("node exists");
+        attachment.enabled = enabled;
+        let kind = if enabled {
+            BusEventKind::NodeEnabled {
+                node: node.to_string(),
+            }
+        } else {
+            BusEventKind::NodeDisabled {
+                node: node.to_string(),
+            }
+        };
+        self.events.push(BusEvent::at(at_ns, kind));
         Ok(())
     }
 
@@ -430,15 +493,24 @@ impl CanBus {
             if first_contender.is_none() {
                 first_contender = Some(node.clone());
             }
-            if self.driver_state(&node) != ErrorState::BusOff {
+            let attachment = self.nodes.get(node.as_str()).expect("node exists");
+            if attachment.enabled && self.driver_state(&node) != ErrorState::BusOff {
                 eligible.push((node, frame));
             }
         }
         if eligible.is_empty() {
-            // Every contender is bus-off; none can drive the bus.
-            return Err(BusError::NodeBusOff(
-                first_contender.unwrap_or_else(|| String::from("<unknown>")),
-            ));
+            // No contender can drive: every one is bus-off or disabled.
+            let first = first_contender.unwrap_or_else(|| String::from("<unknown>"));
+            let disabled = self
+                .nodes
+                .get(first.as_str())
+                .map(|a| !a.enabled)
+                .unwrap_or(false);
+            return Err(if disabled {
+                BusError::NodeDisabled(first)
+            } else {
+                BusError::NodeBusOff(first)
+            });
         }
 
         let frames: Vec<CanFrame> = eligible.iter().map(|(_, f)| f.clone()).collect();
@@ -645,26 +717,31 @@ impl CanBus {
             .unwrap_or(ErrorState::Active)
     }
 
-    /// Sender must be registered and able to drive (not bus-off).
+    /// Sender must be registered, enabled, and able to drive (not bus-off).
     fn require_driver(&self, sender: &str) -> Result<(), BusError> {
         let attachment = self
             .nodes
             .get(sender)
             .ok_or_else(|| BusError::UnknownNode(sender.to_string()))?;
+        if !attachment.enabled {
+            return Err(BusError::NodeDisabled(sender.to_string()));
+        }
         if attachment.confinement.state() == ErrorState::BusOff {
             return Err(BusError::NodeBusOff(sender.to_string()));
         }
         Ok(())
     }
 
-    /// Registered others, excluding bus-off controllers (which neither
-    /// receive nor acknowledge). Sorted for determinism.
+    /// Registered, enabled others, excluding bus-off controllers (which
+    /// neither receive nor acknowledge). Sorted for determinism.
     fn eligible_receivers(&self, sender: &str) -> Vec<String> {
         let mut receivers: Vec<String> = self
             .nodes
             .iter()
             .filter(|(name, attachment)| {
-                name.as_str() != sender && attachment.confinement.state() != ErrorState::BusOff
+                name.as_str() != sender
+                    && attachment.enabled
+                    && attachment.confinement.state() != ErrorState::BusOff
             })
             .map(|(name, _)| name.clone())
             .collect();
@@ -767,6 +844,53 @@ mod tests {
             bus.transmit("ghost", frame, 0),
             Err(BusError::UnknownNode("ghost".into()))
         );
+    }
+
+    #[test]
+    fn disabled_nodes_neither_drive_nor_receive() {
+        let mut bus = bus2();
+        // Idempotent: enabling an enabled node emits nothing.
+        let before = bus.events().len();
+        bus.set_node_enabled("a", true, 0).unwrap();
+        assert_eq!(bus.events().len(), before);
+        assert!(matches!(
+            bus.set_node_enabled("ghost", false, 0),
+            Err(BusError::UnknownNode(_))
+        ));
+
+        bus.set_node_enabled("b", false, 0).unwrap();
+        // Disabled receivers get nothing (lone-ack error path, like bus-off).
+        let out = bus.transmit("a", frame_123(), 0).unwrap();
+        assert!(out.receivers.is_empty());
+        // Disabled senders fail loudly.
+        assert_eq!(
+            bus.transmit("b", frame_123(), 0),
+            Err(BusError::NodeDisabled("b".into()))
+        );
+        // Simultaneous rounds skip disabled contenders; all-disabled
+        // rounds name the condition instead of pretending bus-off.
+        let out = bus
+            .transmit_simultaneous(
+                vec![("a".into(), frame_123()), ("b".into(), frame_123())],
+                0,
+            )
+            .unwrap();
+        assert_eq!(out.winner_node, "a");
+        assert!(out.loser_nodes.is_empty());
+        bus.set_node_enabled("a", false, 0).unwrap();
+        assert!(matches!(
+            bus.transmit_simultaneous(vec![("a".into(), frame_123())], 0),
+            Err(BusError::NodeDisabled(_))
+        ));
+        // Events mark both transitions; reset re-enables everything.
+        let kinds: Vec<&BusEventKind> = bus.events().iter().map(|e| &e.kind).collect();
+        assert!(kinds.iter().any(|k| matches!(
+            k,
+            BusEventKind::NodeDisabled { node } if node == "b"
+        )));
+        bus.reset_time();
+        let out = bus.transmit("b", frame_123(), 0).unwrap();
+        assert_eq!(out.receivers, vec!["a".to_string()]);
     }
 
     #[test]

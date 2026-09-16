@@ -695,6 +695,28 @@ impl Session {
         Ok(())
     }
 
+    /// Operator enable/disable (§35 node faults): runtime-only, never
+    /// persisted to the project file. A disabled node keeps its
+    /// declaration (still counts for bus-in-use guards) but neither
+    /// drives nor receives; reset re-enables everything.
+    pub fn set_node_enabled(&mut self, node: &str, enabled: bool) -> Result<(), SessionError> {
+        let bus = {
+            let loaded = self.loaded.as_ref().ok_or(SessionError::NoProject)?;
+            loaded
+                .node_bus
+                .get(node)
+                .cloned()
+                .ok_or_else(|| SessionError::UnknownNode(node.into(), known_nodes(loaded)))?
+        };
+        self.engine.set_node_enabled(&bus, node, enabled)?;
+        Ok(())
+    }
+
+    /// Currently disabled nodes, sorted (for status displays).
+    pub fn disabled_nodes(&self) -> Vec<String> {
+        self.engine.disabled_nodes()
+    }
+
     pub fn resume(&mut self) -> Result<(), SessionError> {
         self.require_loaded()?;
         self.engine.start();
@@ -1542,6 +1564,37 @@ nodes:
             .unwrap_err();
         assert!(matches!(err, SessionError::MixedArbitrationBuses(_)));
         assert!(err.to_string().contains("bus_a") && err.to_string().contains("bus_b"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn disable_enable_is_runtime_only_and_loud() {
+        let mut s = Session::new();
+        assert!(matches!(
+            s.set_node_enabled("n", false),
+            Err(SessionError::NoProject)
+        ));
+        let dir = tmpdir("enable");
+        let path = write_project(&dir, "p.canlab", TWO_NODES);
+        s.load(&path).unwrap();
+        assert!(matches!(
+            s.set_node_enabled("ghost", false),
+            Err(SessionError::UnknownNode(_, _))
+        ));
+
+        // Disable the receiver: scripted traffic transmits, nothing delivers.
+        s.set_node_enabled("dashboard", false).unwrap();
+        assert_eq!(s.disabled_nodes(), vec!["dashboard".to_string()]);
+        let summary = s.start().unwrap();
+        assert_eq!((summary.transmitted, summary.received), (1, 0));
+        // Disabled senders fail loudly (like bus-off).
+        assert!(s.inject("dashboard", 0x200, false, &[1]).is_err());
+        // Re-enable restores delivery; reset re-enables everything.
+        s.set_node_enabled("dashboard", true).unwrap();
+        assert!(s.disabled_nodes().is_empty());
+        s.set_node_enabled("dashboard", false).unwrap();
+        s.reset().unwrap();
+        assert!(s.disabled_nodes().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

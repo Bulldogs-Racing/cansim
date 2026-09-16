@@ -96,7 +96,8 @@ The GUI is a web app with three parts: a network **canvas**, run/simulation
   selected node. **New** starts a blank canvas, **Save** writes the project
   YAML to the path box (save-as included); the ● unsaved chip tracks dirty
   state. Removing a bus in use or a node with scripted messages is refused
-  with the reason shown.
+  with the reason shown. The properties panel also offers **Disable node**
+  (runtime-only: the node stops driving/receiving until re-enabled or reset).
 - **Scripted traffic**: the panel below the canvas lists the frames Run
   transmits in order — add frames (sender, hex id, hex bytes, extended
   flag), edit rows in place (Edit loads a row into the form, Update

@@ -99,6 +99,7 @@ export default function App(): JSX.Element {
   const [bitLayout, setBitLayout] = useState<FrameBits | null>(null);
   const [dbcPath, setDbcPath] = useState("examples/vehicle.dbc");
   const [decoded, setDecoded] = useState<{ message: string; signals: DecodedSignal[] } | null>(null);
+  const [disabledNodes, setDisabledNodes] = useState<string[]>([]);
   const [summary, setSummary] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -113,6 +114,7 @@ export default function App(): JSX.Element {
     setState(reply.state);
     setLoadedPath(reply.projectPath);
     setDirty(reply.dirty);
+    setDisabledNodes(reply.disabled ?? []);
     if (pausedRef.current) return;
     cursorRef.current = reply.nextSeq;
     setRows((prev) => prev.filter((r) => r.seq < reply.nextSeq));
@@ -134,6 +136,7 @@ export default function App(): JSX.Element {
       setNodes([]);
       setMessages([]);
       setFaults([]);
+      setDisabledNodes([]);
       setFlowNodes([]);
       setFlowEdges([]);
       setCanvasSel(null);
@@ -590,6 +593,11 @@ export default function App(): JSX.Element {
             ● unsaved
           </span>
         )}
+        {connected && disabledNodes.length > 0 && (
+          <span aria-label={`${disabledNodes.length} nodes disabled`} title={`Disabled: ${disabledNodes.join(", ")} (reset re-enables)`} style={{ padding: "2px 10px", borderRadius: 999, background: "#7f1d1d", border: "1px solid #ef4444" }}>
+            ⛔ {disabledNodes.length} disabled
+          </span>
+        )}
         {!connected ? (
           <button style={btn} onClick={connect}>Connect</button>
         ) : (
@@ -667,8 +675,14 @@ export default function App(): JSX.Element {
               key={selNode.id}
               node={selNode}
               buses={buses}
+              disabled={disabledNodes.includes(selNode.id)}
               onApply={(next) => editCmd("Update", { type: "UpdateNode", id: selNode.id, node: next })}
               onDelete={() => removeFlowNode(`node:${selNode.id}`)}
+              onToggleEnabled={() => {
+                const id = selNode.id;
+                if (disabledNodes.includes(id)) void runCmd("EnableNode", { type: "EnableNode", id });
+                else void runCmd("DisableNode", { type: "DisableNode", id });
+              }}
             />
           ) : selBus ? (
             <BusProps
@@ -1251,11 +1265,13 @@ function FaultPoliciesPanel({ faults, nodes, onAdd, onRemove }: {
   );
 }
 
-function NodeProps({ node, buses, onApply, onDelete }: {
+function NodeProps({ node, buses, disabled, onApply, onDelete, onToggleEnabled }: {
   node: ProjectNode;
   buses: ProjectBus[];
+  disabled: boolean;
   onApply: (next: NodeDecl) => void;
   onDelete: () => void;
+  onToggleEnabled: () => void;
 }): JSX.Element {
   const [device, setDevice] = useState(node.device);
   const [firmware, setFirmware] = useState(node.firmware ?? "");
@@ -1264,7 +1280,7 @@ function NodeProps({ node, buses, onApply, onDelete }: {
   const btn: React.CSSProperties = { padding: "6px 12px", borderRadius: 6, border: "1px solid #374151", background: "#1f2937", color: "#e5e7eb", cursor: "pointer", marginRight: 8 };
   return (
     <div>
-      <p style={{ margin: "0 0 8px" }}><strong>{node.id}</strong> · backend virtual (live session runs virtual nodes only)</p>
+      <p style={{ margin: "0 0 8px" }}><strong>{node.id}</strong> · backend virtual (live session runs virtual nodes only){disabled && " · ⛔ disabled"}</p>
       <label>Device
         <select style={field} value={device} onChange={(e) => setDevice(e.target.value)}>
           {KNOWN_DEVICES.map((d) => <option key={d} value={d}>{d}</option>)}
@@ -1287,6 +1303,7 @@ function NodeProps({ node, buses, onApply, onDelete }: {
         peripherals: node.peripherals ?? [],
       })}>Apply</button>
       <button style={{ ...btn, borderColor: "#7f1d1d" }} onClick={onDelete}>Delete node</button>
+      <button style={btn} title="Runtime-only: disabled nodes neither drive nor receive; reset re-enables" onClick={onToggleEnabled}>{disabled ? "Enable node" : "Disable node"}</button>
     </div>
   );
 }

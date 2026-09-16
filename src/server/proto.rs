@@ -131,6 +131,15 @@ pub enum ClientMsg {
     RemoveNode {
         id: String,
     },
+    /// Operator disable/enable (§35 node faults): runtime-only, never
+    /// persisted. Disabled nodes neither drive nor receive; reset
+    /// re-enables everything.
+    DisableNode {
+        id: String,
+    },
+    EnableNode {
+        id: String,
+    },
     /// Validate strictly and write the project YAML. `path` overrides the
     /// loaded path (save-as); without either there is nowhere to write.
     SaveProject {
@@ -215,6 +224,7 @@ pub enum ServerMsg {
         projectPath: Option<String>,
         buses: Vec<String>,
         nodes: Vec<String>,
+        disabled: Vec<String>,
         nextSeq: usize,
         dirty: bool,
     },

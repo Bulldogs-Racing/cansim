@@ -278,6 +278,16 @@ fn dispatch(state: &Arc<Mutex<ServerState>>, text: &str) -> ServerMsg {
         ClientMsg::RemoveNode { id } => {
             ok_or_error(s.session.remove_node(&id).map(|()| status_of(&s.session)))
         }
+        ClientMsg::DisableNode { id } => ok_or_error(
+            s.session
+                .set_node_enabled(&id, false)
+                .map(|()| status_of(&s.session)),
+        ),
+        ClientMsg::EnableNode { id } => ok_or_error(
+            s.session
+                .set_node_enabled(&id, true)
+                .map(|()| status_of(&s.session)),
+        ),
         ClientMsg::SaveProject { path } => {
             let target = path.as_deref().map(Path::new);
             match s.session.save(target) {
@@ -623,6 +633,7 @@ fn status_of(s: &Session) -> ServerMsg {
         projectPath: s.project_path().map(|p| p.display().to_string()),
         buses,
         nodes,
+        disabled: s.disabled_nodes(),
         nextSeq: s.events().len(),
         dirty: s.dirty(),
     }

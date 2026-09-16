@@ -450,6 +450,40 @@ fn ws_decode_frame_uses_dbc_file() {
 }
 
 #[test]
+fn ws_disable_enable_flows_through_status() {
+    let dir = std::env::temp_dir().join(format!("canlab-ws-en-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let proj = dir.join("p.canlab");
+    std::fs::write(&proj, PROJECT).unwrap();
+
+    let port = serve_ephemeral(Arc::new(Mutex::new(ServerState::new(1))));
+    let (mut ws, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}")).unwrap();
+    let req = serde_json::json!({"type": "Load", "path": proj.display().to_string()}).to_string();
+    assert_eq!(rpc(&mut ws, &req)["type"], "Status");
+
+    // Disable: Status names the node; traffic stops delivering.
+    let status = rpc(&mut ws, r#"{"type":"DisableNode","id":"dashboard"}"#);
+    assert_eq!(status["type"], "Status");
+    assert_eq!(status["disabled"], serde_json::json!(["dashboard"]));
+    let summary = rpc(&mut ws, r#"{"type":"Start"}"#);
+    assert_eq!(summary["received"], 0);
+    // Unknown nodes are an Error, not a silent no-op.
+    assert_eq!(
+        rpc(&mut ws, r#"{"type":"DisableNode","id":"ghost"}"#)["type"],
+        "Error"
+    );
+
+    // Re-enable: delivery restored, list cleared.
+    let status = rpc(&mut ws, r#"{"type":"EnableNode","id":"dashboard"}"#);
+    assert_eq!(status["type"], "Status");
+    assert_eq!(status["disabled"].as_array().unwrap().len(), 0);
+    let summary = rpc(&mut ws, r#"{"type":"Start"}"#);
+    assert_eq!(summary["received"], 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn ws_fault_crud_applies() {
     let dir = std::env::temp_dir().join(format!("canlab-ws-faults-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

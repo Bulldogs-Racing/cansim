@@ -75,6 +75,17 @@ Policies are editable over WS (`AddFault`/`UpdateFault`/`RemoveFault`,
 index-addressed like messages — see `bugs.md`) and in the GUI *Fault
 policies* panel; a node named by a policy cannot be removed first.
 
+## Node disable/enable (§35 node faults, slice 4)
+
+The properties panel's **Disable node** takes a node off the bus without
+changing the topology: it neither drives nor receives, keeps its
+declaration and error counters, and still counts for bus-in-use guards.
+Transmitting *from* a disabled node fails loudly (like bus-off).
+Disables are runtime-only — never written to the project file — and
+**reset re-enables everything** (fresh deterministic start, alongside
+reseeded fault streams). The header shows a ⛔ chip while any node is
+disabled; enable/disable transitions are bus events in the log.
+
 ## Deferred (explicit)
 
 - Bus-line faults (disconnect CANH/CANL, force dominant/recessive),

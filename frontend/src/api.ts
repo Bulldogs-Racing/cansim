@@ -30,6 +30,8 @@ export type ClientMsg =
   | { type: "AddNode"; node: NodeDecl }
   | { type: "UpdateNode"; id: string; node: NodeDecl }
   | { type: "RemoveNode"; id: string }
+  | { type: "DisableNode"; id: string }
+  | { type: "EnableNode"; id: string }
   | { type: "SaveProject"; path?: string | null }
   | { type: "AddMessage"; message: MessageDecl }
   | { type: "UpdateMessage"; index: number; message: MessageDecl }
@@ -100,6 +102,8 @@ export type BusEventKind =
   | { NodeRegistered: { node: string } }
   | { NodeUnregistered: { node: string } }
   | { NodeReset: { node: string } }
+  | { NodeDisabled: { node: string } }
+  | { NodeEnabled: { node: string } }
   | { ArbitrationStarted: { contenders: string[] } }
   | { ArbitrationLost: { node: string; winner: string } }
   | { FrameTransmitted: { sender: string; frame: WireCanFrame } }
@@ -211,7 +215,7 @@ export interface RenodeJob {
 }
 
 export type ServerMsg =
-  | { type: "Status"; state: EngineState; projectPath: string | null; buses: string[]; nodes: string[]; nextSeq: number; dirty: boolean }
+  | { type: "Status"; state: EngineState; projectPath: string | null; buses: string[]; nodes: string[]; disabled: string[]; nextSeq: number; dirty: boolean }
   | { type: "Events"; events: SeqEvent[]; nextSeq: number }
   | { type: "Project"; project: ProjectDoc }
   | { type: "RunSummary"; transmitted: number; received: number; nextSeq: number }

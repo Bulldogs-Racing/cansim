@@ -198,6 +198,39 @@ impl Engine {
         Ok(())
     }
 
+    /// Operator enable/disable (§35 node faults): mirrors the bus's
+    /// enable/disable events into the engine log like every other bus
+    /// event. Runtime-only — declarations (and saves) are untouched.
+    pub fn set_node_enabled(
+        &mut self,
+        bus: &str,
+        node: &str,
+        enabled: bool,
+    ) -> Result<(), EngineError> {
+        let t = self.clock.now();
+        let b = self
+            .buses
+            .get_mut(bus)
+            .ok_or_else(|| EngineError::UnknownBus(bus.into()))?;
+        let before = b.events().len();
+        b.set_node_enabled(node, enabled, t)?;
+        let fresh: Vec<_> = b.events()[before..].to_vec();
+        for e in fresh {
+            self.log.push(SimEvent::at(t, SimEventKind::BusTraffic(e)));
+        }
+        Ok(())
+    }
+
+    /// Currently disabled nodes across all buses, sorted (for status).
+    pub fn disabled_nodes(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for bus in self.buses.values() {
+            out.extend(bus.disabled_nodes());
+        }
+        out.sort();
+        out
+    }
+
     pub fn start(&mut self) {
         self.state = EngineState::Running;
         let t = self.clock.now();

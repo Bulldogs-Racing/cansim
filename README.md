@@ -36,6 +36,7 @@ canlab simulate project.canlab         # headless run (virtual or Renode)
 canlab simulate renode.canlab --run-secs 30 --export-json events.json
 canlab replay project.canlab events.json [--export-json out.json]  # deterministically replay a recorded trace (or trace.pcap --as <node>)
 canlab dbc vehicle.dbc --id 0x100 --data "00 10 50 0A 00 00 00 00"  # decode a payload
+canlab sketch node.ino --as my_node          # extract CAN sends from an Arduino sketch (static, never run)
 canlab serve --project project.canlab [--max-jobs 2]  # local WebSocket API for the GUI
 canlab validate project.canlab         # schema + safety checks
 canlab doctor                          # Renode / dotnet / toolchains / SocketCAN

@@ -65,3 +65,34 @@ nodes:
 
 Missing files warn at validation and fail fast at run time with the node
 name attached. Huge binaries are referenced, never embedded (§48).
+
+## Importing Arduino sketches (static analysis, never compiled or run)
+
+Write firmware in the Arduino IDE as usual, then extract its CAN intent:
+
+```bash
+canlab sketch firmware/examples/arduino/mcp_can_sender.ino --as engine_ecu
+```
+
+```text
+firmware/examples/arduino/mcp_can_sender.ino: detected mcp_can
+
+line  lib          id       ext  dlc  data
+23    mcp_can      0x100    -    8    ?counter++ 02 03 04 05 06 07 08
+
+messages:
+  # TODO line 23: dynamic payload skipped (fill example bytes by hand)
+```
+
+The importer reads `#include` lines to pick a dialect at runtime
+(`<mcp_can.h>` → `sendMsgBuf`, `<CAN.h>` → `beginPacket`/`write`/
+`endPacket`; pin with `--dialect mcp_can|arduino-can`), resolves
+same-file `#define`/`const`/byte-array initializers, and flags anything
+runtime-computed (`?expr`) instead of inventing bytes. Fully constant
+sends materialize into `messages:` rows with `source: file:line`
+provenance; dynamic ones need hand-filled example bytes first.
+`<FlexCAN_T4.h>` is recognized but deferred with an explicit error
+(Phase 8); unknown libraries error naming the supported set. Example
+fixtures live in `firmware/examples/arduino/` (parser-only, never
+compiled). GUI import arrives next; the engine never changes — imports
+are ordinary scripted messages.

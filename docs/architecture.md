@@ -82,6 +82,7 @@ docs/             user + developer documentation
 - [x] Export slice — PCAP export (`DLT_CAN_SOCKETCAN`, simulated timestamps, EFF/RTR flags incl. RTR-aware analyzer rows + inspector), verified by byte-level parse-back
 - [x] Phase 12 (slice 1) — DBC subset: message/signal parsing + Intel/Motorola decoding + `canlab dbc` CLI (`docs/dbc.md`, `examples/vehicle.dbc`; multiplexing deferred)
 - [x] Phase 12 (slice 2) — DBC decode over WS (`DecodeFrame` → signals, stateless, serve-cwd-relative path) + "Decode with DBC" in the frame inspector
+- [x] Sketch import (slice 1–2) — Arduino fixtures + dialect-detecting static parser (`src/sketch.rs`: includes, defines, arrays, both dialects; FlexCAN deferred) + `canlab sketch` CLI with `--dialect`/`--as` (GUI import next)
 - [x] Portability slice — `canlab package`: validated shareable closures (firmware + dbc/assets; missing firmware fatal for renode nodes, skipped with warning for virtual)
 - [x] Multi-bus headless runs — the virtual timeline routes every node on its own bus (no cross-bus forwarding), matching the live session; `examples/multi_bus.canlab.yaml` proves isolation. Renode runs stay single-bus (one emulator hub)
 - [x] Phase 4 (WS part, slice 2) — job cancellation (flag polled by the emulator thread; graceful shutdown, `cancelled` state, partials discarded; live-verified) + capped per-job UART over WS (`GetRenodeLog`, last-200 bound, GUI Log viewer; live-verified). Still deferred: Renode console/debugger (§50–§51)

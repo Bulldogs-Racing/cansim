@@ -61,6 +61,20 @@ enum Commands {
     },
     /// Validate a project file without simulating.
     Validate { project: PathBuf },
+    /// Extract CAN sends from an Arduino sketch (static analysis, never
+    /// compiled or run). Prints detected dialects plus a sends table, and
+    /// with --as a messages: YAML snippet for project files.
+    Sketch {
+        /// Sketch file (.ino/.cpp).
+        file: PathBuf,
+        /// Pin the dialect (mcp_can | arduino-can) instead of detecting it
+        /// from #include lines.
+        #[arg(long)]
+        dialect: Option<String>,
+        /// Attribute emitted YAML rows to this node (enables the snippet).
+        #[arg(long = "as")]
+        as_node: Option<String>,
+    },
     /// Decode one CAN payload with a DBC file (Phase 12 slice 1).
     Dbc {
         /// DBC file (message/signal layout).
@@ -116,6 +130,11 @@ fn main() {
             run_secs,
         } => cmd_simulate(&project, export_json.as_deref(), run_secs),
         Commands::Validate { project } => cmd_validate(&project),
+        Commands::Sketch {
+            file,
+            dialect,
+            as_node,
+        } => cmd_sketch(&file, dialect.as_deref(), as_node.as_deref()),
         Commands::Dbc { dbc, id, data } => cmd_dbc(&dbc, &id, &data),
         Commands::Replay {
             project,
@@ -292,6 +311,125 @@ fn cmd_validate(path: &Path) -> i32 {
         }
         None => 1,
     }
+}
+
+/// Extract CAN sends from an Arduino sketch: detection + sends table on
+/// stdout, plus a `messages:` YAML snippet when `--as` names the sending
+/// node. Static analysis only — the sketch is never compiled or run.
+fn cmd_sketch(path: &Path, dialect: Option<&str>, as_node: Option<&str>) -> i32 {
+    use cansimcan::sketch::{extract_can_intent, Constness};
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("failed to read sketch {}: {e}", path.display());
+            return 1;
+        }
+    };
+    let intent = match extract_can_intent(&source, dialect) {
+        Ok(intent) => intent,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    println!(
+        "{}: detected {}",
+        path.display(),
+        if intent.detected.is_empty() {
+            "(override)".into()
+        } else {
+            intent.detected.join(", ")
+        }
+    );
+    if intent.sends.is_empty() {
+        println!("No CAN sends found (the dialect parser saw no send call-sites).");
+        return 0;
+    }
+    println!();
+    println!("line  lib          id       ext  dlc  data");
+    for send in &intent.sends {
+        let id = match &send.id {
+            Constness::Const(id) => format!("{id:#X}"),
+            Constness::Dynamic(expr) => format!("?{expr}"),
+        };
+        let ext = match &send.extended {
+            Constness::Const(true) => "ext".into(),
+            Constness::Const(false) => "-".into(),
+            Constness::Dynamic(expr) => format!("?{expr}"),
+        };
+        let dlc = match &send.dlc {
+            Constness::Const(n) => format!("{n}"),
+            Constness::Dynamic(expr) => format!("?{expr}"),
+        };
+        let data = send
+            .data
+            .iter()
+            .map(|b| match b {
+                Constness::Const(byte) => format!("{byte:02X}"),
+                Constness::Dynamic(expr) => format!("?{expr}"),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "{:<5} {:<12} {:<8} {:<4} {:<4} {}",
+            send.line, send.library, id, ext, dlc, data
+        );
+    }
+    let Some(node) = as_node else {
+        println!();
+        println!("Rerun with --as <node> to emit a messages: YAML snippet.");
+        return 0;
+    };
+    let short = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "sketch.ino".into());
+    println!();
+    println!("messages:");
+    for send in &intent.sends {
+        let (id, extended, dlc, data) = match (&send.id, &send.extended, &send.dlc) {
+            (Constness::Const(id), Constness::Const(extended), Constness::Const(dlc)) => {
+                (id, extended, dlc, &send.data)
+            }
+            _ => {
+                println!(
+                    "  # TODO line {}: dynamic send skipped (fill example bytes by hand)",
+                    send.line
+                );
+                continue;
+            }
+        };
+        if !data.iter().all(|b| !b.is_dynamic()) {
+            println!(
+                "  # TODO line {}: dynamic payload skipped (fill example bytes by hand)",
+                send.line
+            );
+            continue;
+        }
+        let bytes: Vec<u8> = data
+            .iter()
+            .map(|b| match b {
+                Constness::Const(byte) => *byte,
+                Constness::Dynamic(_) => 0,
+            })
+            .collect();
+        let bytes = bytes[..(*dlc as usize).min(bytes.len())].to_vec();
+        println!("  - sender: {node}");
+        println!("    id: {id:#X}");
+        println!(
+            "    data: [{data}]",
+            data = bytes
+                .iter()
+                .map(|b| format!("0x{b:02X}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if *extended {
+            println!("    extended: true");
+        }
+        println!("    source: {short}:{line}", line = send.line);
+    }
+    0
 }
 
 /// Decode one payload with a DBC file: `canlab dbc vehicle.dbc

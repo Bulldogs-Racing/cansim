@@ -1,2596 +1,1546 @@
-# CanLab — Open-Source Visual CAN Network & MCU Simulator
+# CanLab — End-to-End Arduino Firmware Simulation
 
 ## ROLE
 
-You are the lead software architect and engineer responsible for designing and implementing **CanLab**, an open-source CAN-network simulation and embedded-firmware development environment.
+Act as the lead engineer continuing the existing CanLab repository.
 
-Do not treat this as a generic electronics simulator.
+**Do not restart or redesign the project from scratch.**
 
-The primary purpose of CanLab is:
+First inspect the existing repository and preserve the working architecture and functionality already present. The repository already contains substantial CAN simulation, project management, WebSocket, frontend, analyzer, fault-injection, DBC, replay, sketch parsing, and STM32/Renode work.
 
-> **Allow users to visually construct a network containing simulated Arduino, STM32, and Teensy microcontrollers, run real compiled firmware on those simulated devices, connect their CAN peripherals/controllers to a simulated CAN bus, inspect and debug CAN traffic, inject CAN/network faults, and eventually bridge simulated CAN networks to real CAN hardware.**
+The next objective is not to add more broad features.
 
-The project should be architected so that the CAN simulation engine, MCU emulation backends, project format, frontend, and hardware interfaces are independent components.
-
-The application should eventually be capable of:
+The next objective is to make this workflow actually work:
 
 ```text
-                 CanLab
-
-       ┌─────────────────────────┐
-       │      Visual Editor      │
-       │                         │
-       │ STM32 ──────┐           │
-       │             │           │
-       │ Arduino ────┼── CAN ────┼── Teensy
-       │             │           │
-       └─────────────┼───────────┘
-                     │
-                     ▼
-              Simulation Engine
-                     │
-             ┌───────┴────────┐
-             ▼                ▼
-          Renode          Future backends
-             │
-             ▼
-        MCU emulation
-             │
-             ▼
-          CAN bus
-             │
-             ▼
-       CAN Analyzer
+Launch CanLab
+    ↓
+Import/select an Arduino project
+    ↓
+Select Arduino board
+    ↓
+Compile the real Arduino firmware
+    ↓
+Load the compiled firmware into a real MCU emulator
+    ↓
+Connect the emulated MCU's CAN controller to CanLab's virtual CAN bus
+    ↓
+Run firmware
+    ↓
+Observe actual CAN TX/RX traffic live in CanLab
+    ↓
+Test the Arduino code without any physical CAN hardware
 ```
+
+The simulator must execute the user's actual compiled firmware.
+
+It must not replace the firmware with parsed CAN messages or a hand-written approximation.
 
 ---
 
-# 1. CORE PRODUCT PRINCIPLES
+# 1. CURRENT REPOSITORY REALITY
 
-Follow these principles throughout the implementation.
+Treat the current repository as the starting point.
 
-## 1.1 CAN-first
+Already implemented:
 
-CanLab is NOT initially a general SPICE/electronics simulator.
+- Rust CAN frame/model layer
+- CAN identifiers
+- virtual CAN buses
+- arbitration
+- deterministic simulation clock
+- CAN timing
+- CRC
+- bit stuffing
+- ACK/error behavior
+- error counters and bus-off behavior
+- deterministic faults
+- YAML project format
+- headless `canlab simulate`
+- WebSocket server
+- React/React Flow topology editor
+- project editing and saving
+- scripted CAN traffic
+- CAN analyzer
+- live event polling
+- filtering/export/inspection
+- bit-level frame inspection
+- DBC decoding
+- replay
+- PCAP support
+- Renode process supervision
+- real STM32F103 firmware execution through Renode
+- Arduino sketch static analysis
+- `canlab sketch`
 
-Do NOT spend early development time implementing:
+The current Arduino sketch importer is **not** a firmware execution system.
 
-* analog circuits
-* arbitrary resistors
-* capacitors
-* inductors
-* op-amps
-* transistors
-* arbitrary PCB simulation
-* full electrical engineering simulation
-
-The initial component system should focus on:
-
-* microcontrollers
-* CAN controllers
-* CAN transceivers
-* CAN buses
-* digital I/O where useful
-* terminals
-* logic analyzers
-* CAN analyzers
-* fault-injection devices
-
-The architecture may eventually permit general circuit simulation, but that must not compromise the CAN-focused MVP.
-
----
-
-# 2. PRIMARY GOALS
-
-CanLab must eventually support:
-
-### Microcontrollers
-
-Initial targets:
-
-1. STM32F103
-2. Arduino Uno / ATmega328P
-3. Arduino + MCP2515
-4. Teensy 4.1 / NXP i.MX RT1062
-
-Future targets should be easy to add.
-
-### CAN
-
-Support:
-
-* Classical CAN
-* Standard 11-bit identifiers
-* Extended 29-bit identifiers
-* RTR frames
-* DLC
-* 8-byte Classical CAN payloads
-* arbitration
-* dominant/recessive logic
-* ACK
-* CRC
-* bit stuffing
-* error handling
-* error counters
-* error passive
-* bus-off
-* CAN FD architecture
-* CAN FD eventually
-* bit-rate switching eventually
-
-### Firmware
-
-Allow real compiled firmware to execute inside the simulated MCU backend.
-
-Examples:
+It currently:
 
 ```text
-STM32 firmware ELF
-        ↓
-simulated STM32
-        ↓
-simulated bxCAN
-        ↓
-CAN bus
+Arduino source
+    ↓
+static parser
+    ↓
+CAN send calls
+    ↓
+scripted MessageDecl
+    ↓
+logical CAN simulation
 ```
 
-and:
+That is useful as a preview/tooling feature, but it is not sufficient for the new goal.
+
+The desired execution path is:
 
 ```text
-Arduino firmware
-        ↓
-simulated ATmega328P
-        ↓
+Arduino source
+    ↓
+Arduino build system
+    ↓
+ELF/HEX firmware
+    ↓
+AVR MCU emulator
+    ↓
+real Arduino firmware execution
+    ↓
 SPI
-        ↓
-simulated MCP2515
-        ↓
-CAN bus
-```
-
-and eventually:
-
-```text
-Teensy firmware
-        ↓
-simulated i.MX RT1062
-        ↓
-FlexCAN
-        ↓
-CAN bus
-```
-
----
-
-# 3. ARCHITECTURE
-
-Use a layered architecture.
-
-```text
-┌───────────────────────────────────────────────┐
-│                 Frontend                      │
-│ React / TypeScript                            │
-├───────────────────────────────────────────────┤
-│              Application API                  │
-│ Project management / simulation control       │
-├───────────────────────────────────────────────┤
-│            Simulation Manager                 │
-├───────────────────────────────────────────────┤
-│                CAN Core                       │
-│ bus / arbitration / frames / timing / errors  │
-├───────────────────────────────────────────────┤
-│           MCU Backend Interface               │
-├───────────────────────────────────────────────┤
-│                  Renode                       │
-│          Initial emulation backend            │
-├───────────────────────────────────────────────┤
-│             Future backends                   │
-│ QEMU / native / other emulators               │
-├───────────────────────────────────────────────┤
-│             Hardware Interfaces               │
-│ SocketCAN / USB-CAN                           │
-└───────────────────────────────────────────────┘
-```
-
-Never tightly couple the frontend to Renode.
-
-Never make Renode-specific assumptions part of the core CAN model.
-
----
-
-# 4. RECOMMENDED TECHNOLOGY
-
-Use:
-
-## Backend
-
-Rust.
-
-Reasons:
-
-* strong type safety
-* good concurrency model
-* suitable for simulation engines
-* good binary/tooling ecosystem
-* easy creation of a standalone CLI
-* good future library reuse
-
-## Frontend
-
-TypeScript + React.
-
-Use a graph/canvas library such as React Flow if it materially simplifies the editor.
-
-Use SVG/canvas/WebGL only where appropriate.
-
-## Communication
-
-Use a local WebSocket API between frontend and backend.
-
-The architecture should also permit a future HTTP/REST API where useful.
-
----
-
-# 5. REPOSITORY STRUCTURE
-
-Use a structure approximately like:
-
-```text
-canlab/
-│
-├── README.md
-├── LICENSE
-├── CONTRIBUTING.md
-├── SECURITY.md
-├── CODE_OF_CONDUCT.md
-├── Cargo.toml
-├── package.json
-│
-├── core/
-│   ├── can/
-│   │   ├── frame.rs
-│   │   ├── frame_id.rs
-│   │   ├── bus.rs
-│   │   ├── node.rs
-│   │   ├── arbitration.rs
-│   │   ├── timing.rs
-│   │   ├── crc.rs
-│   │   ├── stuffing.rs
-│   │   ├── errors.rs
-│   │   ├── state.rs
-│   │   └── mod.rs
-│   │
-│   ├── simulation/
-│   │   ├── engine.rs
-│   │   ├── scheduler.rs
-│   │   ├── event.rs
-│   │   └── clock.rs
-│   │
-│   ├── devices/
-│   │   ├── device.rs
-│   │   ├── can_controller.rs
-│   │   ├── transceiver.rs
-│   │   ├── mcp2515.rs
-│   │   └── mod.rs
-│   │
-│   └── project/
-│       ├── project.rs
-│       ├── component.rs
-│       ├── connection.rs
-│       └── serialization.rs
-│
-├── backends/
-│   ├── backend-api/
-│   ├── renode/
-│   │   ├── manager.rs
-│   │   ├── machine.rs
-│   │   ├── can.rs
-│   │   └── templates/
-│   │
-│   └── future/
-│
-├── hardware/
-│   └── socketcan/
-│
-├── server/
-│   ├── api/
-│   ├── websocket/
-│   └── main.rs
-│
-├── cli/
-│   └── main.rs
-│
-├── frontend/
-│   ├── src/
-│   │   ├── editor/
-│   │   ├── components/
-│   │   ├── simulation/
-│   │   ├── analyzer/
-│   │   ├── waveform/
-│   │   ├── project/
-│   │   ├── settings/
-│   │   └── app/
-│   │
-│   └── package.json
-│
-├── firmware/
-│   ├── examples/
-│   │   ├── stm32/
-│   │   └── arduino/
-│   │
-│   └── tests/
-│
-├── tests/
-│   ├── can/
-│   ├── integration/
-│   └── firmware/
-│
-└── docs/
-    ├── architecture/
-    ├── can/
-    ├── devices/
-    ├── firmware/
-    └── user-guide/
-```
-
-Adjust the exact structure if a better architecture is discovered, but preserve the separation of concerns.
-
----
-
-# 6. CAN CORE
-
-Implement the CAN protocol engine independently of any MCU emulator.
-
-The CAN core must be usable without the frontend.
-
-## Frame
-
-Create a strongly typed frame representation.
-
-Conceptually:
-
-```rust
-struct CanFrame {
-    id: CanId,
-    frame_type: FrameType,
-    dlc: u8,
-    data: Vec<u8>,
-}
-```
-
-Represent:
-
-* standard ID
-* extended ID
-* data frame
-* remote frame
-* Classical CAN
-* future CAN FD
-
-Validate:
-
-* identifier ranges
-* DLC
-* payload size
-* frame type compatibility
-
-Do not allow invalid states where practical.
-
----
-
-# 7. CAN BUS
-
-Implement a virtual CAN bus abstraction.
-
-Example:
-
-```text
-CanBus
- ├── Node A
- ├── Node B
- ├── Node C
- └── Node D
-```
-
-The bus must:
-
-* register nodes
-* unregister nodes
-* accept transmissions
-* perform arbitration
-* deliver winning frames
-* report collisions/arbitration losses
-* manage timing
-* expose events to observers
-* support fault injection
-* support bus state
-
----
-
-# 8. ARBITRATION
-
-Implement real CAN arbitration semantics.
-
-Example:
-
-```text
-Node A: 0x300
-Node B: 0x100
-Node C: 0x200
-```
-
-The lower identifier must win.
-
-The simulator must expose arbitration events.
-
-For example:
-
-```text
-Arbitration started
-
-Node A: 0x300
-Node B: 0x100
-Node C: 0x200
-
-Winner: Node B
-Lost:
-  Node A
-  Node C
-```
-
-Eventually the UI should visualize this.
-
----
-
-# 9. TIMING
-
-Do not make the entire simulator dependent on wall-clock timing.
-
-Create a simulation clock.
-
-Support:
-
-* simulated timestamps
-* deterministic simulation
-* accelerated simulation
-* paused simulation
-* step-by-step simulation
-* real-time mode where practical
-
-The engine should be deterministic when running the same project with the same seed/configuration.
-
-Represent time using a precise unit such as nanoseconds or another appropriate integer-based representation.
-
-Avoid floating-point time for core scheduling.
-
----
-
-# 10. CAN BIT MODEL
-
-Eventually support a bit-level representation.
-
-Represent:
-
-* SOF
-* arbitration
-* control
-* data
-* CRC
-* ACK
-* EOF
-* inter-frame spacing
-
-Implement bit stuffing.
-
-The bit-level representation must be separate from the higher-level frame API.
-
-The high-level frame API should remain convenient.
-
----
-
-# 11. CRC
-
-Implement the appropriate Classical CAN CRC behavior.
-
-Provide unit tests using known-good frame examples.
-
-Do not invent protocol behavior.
-
-Where protocol details are uncertain, consult authoritative CAN specifications/references before implementation.
-
-Document protocol assumptions.
-
----
-
-# 12. ERROR HANDLING
-
-Model:
-
-* bit errors
-* stuff errors
-* CRC errors
-* form errors
-* ACK errors
-* error frames
-* transmit error counter
-* receive error counter
-* error active
-* error passive
-* bus-off
-
-The simulator should expose:
-
-```text
-TEC
-REC
-State
-```
-
-for each CAN controller.
-
-Example:
-
-```text
-Node: ECU
-
-TEC: 128
-REC: 4
-
-State:
-ERROR PASSIVE
-```
-
----
-
-# 13. CAN CONTROLLER ABSTRACTION
-
-Do NOT make STM32, Arduino, and Teensy directly communicate with the bus.
-
-Introduce:
-
-```text
-MCU
- ↓
-CAN peripheral/controller
- ↓
+    ↓
+MCP2515 model
+    ↓
 CAN controller interface
- ↓
-transceiver
- ↓
-CAN bus
+    ↓
+CanLab virtual CAN bus
+    ↓
+CAN analyzer
 ```
-
-Define a common interface.
-
-Conceptually:
-
-```rust
-trait CanController {
-    fn transmit(...);
-    fn receive(...);
-    fn configure(...);
-    fn reset(...);
-    fn status(...);
-}
-```
-
-The exact API may differ.
 
 ---
 
-# 14. MCP2515
+# 2. PRIMARY PRODUCT GOAL
 
-Implement an MCP2515 model sufficient for real Arduino CAN libraries.
+Make the following user experience real:
 
-Architecture:
+```text
+1. Start CanLab.
+
+2. Click:
+   Import Arduino Project
+
+3. Select an Arduino project directory.
+
+4. CanLab detects:
+   - .ino files
+   - .cpp files
+   - .h files
+   - project structure
+   - board/build configuration
+   - required libraries
+
+5. User selects:
+   Arduino Uno
+
+6. CanLab compiles the project.
+
+7. CanLab shows:
+   ✓ Compilation successful
+   Firmware: ...
+   Board: Arduino Uno
+   Artifact: ...
+
+8. User places:
+
+   Arduino Uno
+        │
+        │
+   virtual CAN bus
+        │
+   Arduino receiver
+
+9. Press:
+   ▶ Run
+
+10. The actual firmware executes inside the MCU emulator.
+
+11. The firmware's CAN controller communicates with
+    the virtual CAN bus.
+
+12. CAN Analyzer shows actual frames.
+
+13. The user can change the Arduino firmware,
+    recompile it, run it again, and observe
+    different behavior.
+
+No physical Arduino.
+
+No physical CAN transceiver.
+
+No physical CAN adapter.
+
+No physical CAN endpoint.
+
+```
+
+This is the core milestone.
+
+---
+
+# 3. IMPORTANT DISTINCTION: PARSING VS EXECUTION
+
+Keep the current Arduino sketch parser.
+
+Do not delete it.
+
+However, redefine its role.
+
+The parser is:
+
+```text
+preflight / inspection / preview
+```
+
+not:
+
+```text
+firmware execution
+```
+
+It may be used to determine:
+
+- probable CAN library
+- CAN API usage
+- source locations
+- likely CAN IDs
+- likely dependencies
+- helpful diagnostics
+
+But the parser must never be used as a substitute for actual firmware execution when the user selects **Run Firmware**.
+
+For example, this firmware:
+
+```cpp
+byte counter = 0;
+
+void loop() {
+    engineData[0] = counter++;
+    CAN.sendMsgBuf(CAN_ID, 0, 8, engineData);
+}
+```
+
+must produce changing byte values during simulation.
+
+A static parser cannot reproduce that correctly.
+
+The end-to-end test must specifically verify this.
+
+---
+
+# 4. INITIAL HARDWARE TARGET
+
+Do not attempt to support every Arduino board.
+
+The first executable Arduino target is:
+
+```text
+Arduino Uno
+ATmega328P
+MCP2515
+Classical CAN
+```
+
+Use this architecture:
 
 ```text
 ATmega328P
-    │
-    │ SPI
-    ▼
-MCP2515
-    │
-    ▼
-CAN transceiver
-    │
-    ▼
-CAN bus
+     │
+     │ SPI
+     ▼
+ MCP2515
+     │
+     ▼
+ CAN interface
+     │
+     ▼
+CanLab virtual CAN bus
 ```
 
-Support relevant:
+The first supported Arduino library should be:
 
-* SPI commands
-* registers
-* configuration
-* bit timing
-* TX buffers
-* RX buffers
-* interrupts
-* masks
-* filters
-* error states
+```text
+mcp_can.h
+```
 
-Prioritize compatibility with common Arduino MCP2515 libraries.
+The existing `mcp_can_sender.ino` fixture should become a real buildable firmware fixture instead of being parser-only.
 
-Do not fake the peripheral at the firmware API level.
+Do not silently emulate the Arduino as an STM32.
 
-The firmware should interact with the simulated MCP2515 through SPI exactly as it would on hardware.
+Do not pretend the existing Renode STM32 backend is an Arduino backend.
 
 ---
 
-# 15. STM32F103
+# 5. AVR EXECUTION BACKEND
 
-Initial STM32 target:
+Create a genuine MCU execution backend for the Arduino Uno / ATmega328P.
 
-**STM32F103C8 / closely compatible STM32F103 variant.**
+The existing backend abstraction must be extended rather than bypassed.
 
-The objective is to run real firmware.
+Conceptually:
 
-Support the MCU's relevant:
+```rust
+trait McuBackend {
+    fn load_firmware(...);
+    fn start(...);
+    fn pause(...);
+    fn resume(...);
+    fn reset(...);
+    fn stop(...);
+    fn step(...);
+    fn inspect(...);
+}
+```
 
-* CPU
-* memory
-* clocks as required
-* GPIO where needed
-* CAN peripheral
-* interrupts
-* relevant timers/peripherals needed by common CAN firmware
+Adapt the exact API to the existing architecture.
 
-Do not implement the entire STM32 peripheral set unless required.
+The AVR backend must execute actual compiled AVR instructions.
 
-Prioritize CAN functionality.
+It must not:
 
-Support firmware supplied as ELF/bin/hex as appropriate for the backend.
+- parse the source and simulate its intent
+- detect `CAN.sendMsgBuf()` and inject a fake frame
+- translate Arduino calls directly into CAN frames
+- emulate an AVR by using the STM32 backend
+- generate predetermined frame sequences
+
+Actual firmware execution is required.
 
 ---
 
-# 16. TEENSY 4.1
+# 6. AVR EMULATOR SELECTION
 
-Add after STM32 and Arduino are working.
+Before implementing the backend, inspect available emulator technologies and choose an actual mechanism capable of executing ATmega328P firmware.
 
-Target:
+Prefer an existing emulator/library when practical.
 
-**Teensy 4.1 / NXP i.MX RT1062**
+The emulator must provide enough functionality for the first target:
 
-The relevant CAN peripheral is FlexCAN.
+```text
+CPU
+Flash
+RAM
+GPIO as needed
+SPI
+interrupts
+timers/delay behavior as needed
+UART where useful
+```
+
+Do not select an emulator merely because its name appears to support AVR.
+
+Verify that it can actually execute an ATmega328P ELF/HEX image.
+
+Document:
+
+- why it was selected
+- how firmware is loaded
+- how SPI is exposed
+- how interrupts are handled
+- how simulated time is advanced
+
+The emulator must be cleanly isolated behind the CanLab backend interface.
+
+---
+
+# 7. MCP2515 MODEL
+
+Implement an actual MCP2515 peripheral model sufficient to run common Arduino `mcp_can` firmware.
+
+The firmware must communicate with it through simulated SPI.
 
 Architecture:
 
 ```text
-i.MX RT1062
-     │
-   FlexCAN
-     │
-CAN transceiver
-     │
-  CAN bus
+Arduino firmware
+       │
+       ▼
+ATmega328P SPI peripheral
+       │
+       ▼
+MCP2515 registers
+       │
+       ▼
+MCP2515 CAN controller
+       │
+       ▼
+CanLab CAN controller interface
+       │
+       ▼
+CanLab virtual CAN bus
 ```
 
-Do not pretend Teensy has the same peripheral implementation as STM32.
+Do not modify the Arduino firmware to call a special CanLab API.
 
-The common CAN interface must hide those hardware-specific differences.
+The firmware should believe it is talking to an MCP2515 connected over SPI.
+
+Initially support only the subset required by the existing fixtures and common `mcp_can` usage.
+
+At minimum determine and test support for:
+
+- reset
+- read
+- write
+- bit modify
+- RTS/TX operations used by the selected library
+- CANCTRL
+- CANSTAT
+- CNF registers
+- TX buffers
+- RX buffers
+- RX status
+- interrupt flags
+- CANINTF
+- filters/masks as required
+- normal mode
+- receive behavior
+- transmit completion
+- SPI timing sufficient for realistic firmware behavior
+
+Do not claim full MCP2515 compatibility until it is actually tested.
 
 ---
 
-# 17. MCU BACKEND INTERFACE
+# 8. CONNECT MCP2515 TO THE EXISTING CAN ENGINE
 
-Create a backend abstraction.
+The MCP2515 must not bypass the existing CAN engine.
+
+It should interact through the existing CAN abstraction.
+
+Use:
+
+```text
+MCP2515
+    ↓
+CanController abstraction
+    ↓
+CanBus
+```
+
+The existing CAN engine remains authoritative for:
+
+- frame validity
+- arbitration
+- bus timing
+- delivery
+- faults
+- errors
+- timestamps
+- event generation
+
+The new MCU backend should feed real controller activity into that system.
+
+Do not create a second independent CAN simulator inside the Arduino backend.
+
+---
+
+# 9. REAL-TIME / EVENT INTEGRATION
+
+The current Renode path includes a batch-run workflow where firmware runs and its observed transmissions can later be imported into the analyzer.
+
+That is useful infrastructure but is not enough for this product goal.
+
+The new firmware execution path needs live event integration.
+
+Desired architecture:
+
+```text
+MCU Emulator
+     │
+     │ controller events
+     ▼
+CanController
+     │
+     ▼
+CanBus
+     │
+     ▼
+Simulation Event Stream
+     │
+     ▼
+WebSocket
+     │
+     ▼
+Frontend
+     │
+     ▼
+CAN Analyzer
+```
+
+The frontend must be able to display traffic while the simulation is running.
+
+Do not require:
+
+```text
+run for 30 seconds
+    ↓
+wait for completion
+    ↓
+import trace
+```
+
+for the normal interactive firmware workflow.
+
+A completed trace import may remain as a secondary feature.
+
+---
+
+# 10. FIRMWARE PROJECT IMPORT
+
+Replace the current single-file-only Arduino import workflow with a proper Arduino project import flow.
+
+The user must be able to select multiple project files.
+
+Support:
+
+```text
+.ino
+.cpp
+.c
+.h
+```
+
+and preserve the relative project structure.
+
+The browser should be able to select a project directory, for example using directory selection where supported.
 
 Conceptually:
 
 ```text
-McuBackend
- ├── load_firmware()
- ├── start()
- ├── stop()
- ├── reset()
- ├── pause()
- ├── resume()
- ├── step()
- ├── inspect()
- └── peripherals()
+my-arduino-project/
+├── my-arduino-project.ino
+├── can_config.h
+├── can_config.cpp
+└── ...
 ```
 
-Renode is the first implementation.
+The application should transmit the selected project files to the local CanLab backend.
 
-Future implementations may include:
+Do not depend on the backend being able to magically access arbitrary files from the user's computer.
 
-* QEMU
-* native MCU emulation
-* another emulator
-* remote simulation
-
-The frontend must not know which backend is active.
+The imported workspace should have a controlled temporary server-side representation.
 
 ---
 
-# 18. RENODE INTEGRATION
+# 11. PROJECT WORKSPACE MODEL
 
-Use Renode as the initial MCU execution backend.
+Introduce a firmware-project abstraction.
 
-Do not fork Renode unnecessarily.
-
-Treat Renode as an external backend/dependency.
-
-Create a manager capable of:
-
-1. starting Renode
-2. creating machines
-3. loading platform descriptions
-4. loading firmware
-5. connecting peripherals
-6. connecting CAN
-7. starting/stopping simulation
-8. collecting CAN events
-9. exposing debug state
-10. shutting down cleanly
-
-Use generated Renode scripts/configurations where appropriate.
-
-Do not hard-code temporary paths.
-
-Make Renode installation/configuration discoverable and configurable.
-
----
-
-# 19. RENODE PROCESS MANAGEMENT
-
-Handle:
-
-* startup failure
-* missing Renode installation
-* crashed Renode process
-* timeout
-* malformed project
-* invalid firmware
-* backend incompatibility
-* clean shutdown
-* restart
-
-Never leave orphaned simulation processes.
-
-Provide useful errors to the UI.
-
-Example:
+Conceptually:
 
 ```text
-Renode could not be started.
-
-Possible causes:
-- Renode is not installed
-- configured path is invalid
-- platform configuration failed
-
-[Configure Renode]
-[View Logs]
+FirmwareProject
+├── name
+├── files[]
+├── board / FQBN
+├── libraries[]
+├── build status
+├── artifact
+└── diagnostics
 ```
 
----
+Keep this separate from the existing CAN project.
 
-# 20. PROJECT FORMAT
-
-Create a human-readable project format.
-
-Prefer YAML or JSON initially.
-
-Example:
+A CanLab project may then reference:
 
 ```yaml
-version: 1
-
-simulation:
-  mode: deterministic
-
-buses:
-  - id: vehicle_bus
-    type: can
-    bitrate: 500000
-    fd: false
-
 nodes:
-
-  - id: engine_ecu
-    device: stm32f103
-    backend: renode
-    firmware: ./firmware/engine.elf
-    can:
-      bus: vehicle_bus
-
-  - id: dashboard
-    device: arduino_uno
-    backend: renode
-    firmware: ./firmware/dashboard.hex
-    peripherals:
-      - type: mcp2515
-        spi: spi0
-    can:
-      bus: vehicle_bus
+    - id: arduino_sender
+      device: arduino_uno
+      backend: avr
+      firmware_project: ./firmware/arduino_sender
+      can:
+          bus: vehicle_bus
 ```
 
-The format must be versioned.
+You may evolve the existing schema version if necessary.
 
-Design for backwards compatibility.
+Provide migration behavior for existing version-1 projects.
 
----
-
-# 21. PROJECT FILE SAFETY
-
-Never blindly execute arbitrary commands from project files.
-
-Treat project files as untrusted input.
-
-Do not permit project configuration to execute arbitrary shell commands unless explicitly and safely designed.
-
-Validate:
-
-* paths
-* component types
-* firmware paths
-* backend identifiers
-* numeric values
-* network configuration
-
-Prevent path traversal where applicable.
+Do not break existing virtual/STM32 projects.
 
 ---
 
-# 22. FRONTEND
+# 12. ARDUINO COMPILATION
 
-Create a visual editor.
+The application needs a real Arduino compilation service.
 
-The editor is a **network topology editor**, not a full SPICE schematic editor.
+Prefer using the standard Arduino build tooling rather than implementing the entire Arduino build system yourself.
 
-Users should be able to drag:
+The initial target should support something equivalent to:
 
 ```text
-STM32
-Arduino
-Teensy
-MCP2515
-CAN Bus
-CAN Analyzer
-CAN Transceiver
+arduino-cli compile
 ```
 
-onto a canvas.
-
----
-
-# 23. EDITOR
-
-Support:
-
-* pan
-* zoom
-* select
-* multi-select
-* move
-* delete
-* duplicate
-* connect
-* disconnect
-* snap-to-grid
-* undo
-* redo
-* keyboard shortcuts
-* save
-* load
-
-Connections should be visually obvious.
-
----
-
-# 24. CAN BUS VISUALIZATION
-
-Represent a CAN bus as an actual network object.
-
-Do not require users to draw every physical wire in the MVP.
-
-For example:
+for:
 
 ```text
-       ┌─────────┐
-       │ STM32   │
-       └────┬────┘
-            │
-            │
-      ══════╪══════ CAN BUS
-            │
-       ┌────┴────┐
-       │ Arduino │
-       └─────────┘
+Arduino Uno
+arduino:avr:uno
 ```
 
-Users can later choose a more detailed physical representation.
+The exact implementation may differ if a better local build mechanism is justified.
+
+The compilation system must:
+
+- locate the configured toolchain
+- detect missing tools
+- compile the complete project
+- compile dependencies/libraries
+- produce an ELF artifact
+- produce HEX when appropriate
+- capture compiler stdout/stderr
+- expose diagnostics to the GUI
+- return structured success/failure information
+
+Do not treat compilation as optional for the executable workflow.
 
 ---
 
-# 25. COMPONENT LIBRARY
+# 13. TOOL DISCOVERY
 
-Initial components:
+Extend `canlab doctor`.
 
-### Microcontrollers
-
-* STM32F103
-* Arduino Uno
-* Teensy 4.1
-
-### CAN
-
-* CAN Bus
-* MCP2515
-* Generic CAN transceiver
-* SN65HVD230
-* TJA1050
-
-### Debugging
-
-* CAN Analyzer
-* Logic Analyzer
-* Serial Terminal
-
-### Digital
-
-Eventually:
-
-* LED
-* button
-* switch
-* potentiometer
-
-These are secondary.
-
----
-
-# 26. MCU CONFIGURATION UI
-
-Clicking an MCU should show:
+It should report things such as:
 
 ```text
-STM32F103
+CanLab Doctor
+
+Rust                     ✓
+Node.js                  ✓
+Frontend dependencies    ✓
+
+Arduino CLI              ✓
+AVR toolchain            ✓
+ATmega328P backend       ✓
+MCP2515 backend           ✓
+
+Renode                   ✓ / optional
+STM32 toolchain           ✓ / optional
+```
+
+Missing Arduino dependencies should produce actionable errors.
+
+Example:
+
+```text
+Arduino compilation is unavailable.
+
+Missing:
+  arduino-cli
+
+The selected target requires:
+  Arduino Uno
+  FQBN: arduino:avr:uno
+
+Install/configure Arduino CLI or select another supported backend.
+```
+
+Do not silently fall back to static parsing.
+
+---
+
+# 14. COMPILATION UI
+
+Add a proper firmware-project panel.
+
+It should provide:
+
+```text
+Arduino Firmware
+
+Project:
+[ my-can-project ]
+
+Board:
+[ Arduino Uno ]
+
+Build:
+[ Compile ]
+
+Status:
+● Ready
+```
+
+After compiling:
+
+```text
+✓ Build successful
+
+Board:
+Arduino Uno
+
+Artifact:
+build/my-can-project.elf
+
+[View Build Log]
+```
+
+On failure:
+
+```text
+✗ Build failed
+
+src/main.cpp:47:
+error: ...
+```
+
+The user must be able to understand why the firmware cannot run.
+
+---
+
+# 15. MCU NODE UI
+
+Clicking the Arduino node should show something like:
+
+```text
+Arduino Uno
 
 Firmware
-[ engine.elf ] [Browse]
+my-can-project
 
 Backend
-[ Renode ]
+AVR
 
-CAN Interface
-[ CAN1 ]
+CAN controller
+MCP2515
 
-CAN Bus
-[ vehicle_bus ]
+CAN bus
+vehicle_bus
 
-Status
-● Running
+Build
+✓ compiled
 
-[Start]
+Simulation
+● stopped
+
+[Compile]
+[Run]
 [Pause]
 [Reset]
 [Stop]
 ```
 
-Expose useful hardware/debug information without overwhelming the user.
+Do not expose Renode/AVR internals in the beginner UI unless useful.
 
----
-
-# 27. SIMULATION CONTROLS
-
-Global controls:
+The frontend should consume backend capabilities rather than checking:
 
 ```text
-▶ Run
-⏸ Pause
-⏹ Stop
-↻ Reset
-⏭ Step
+if device == arduino_uno
 ```
 
-Provide:
-
-* run continuously
-* pause
-* reset
-* step
-* simulation speed
-* real-time/deterministic mode where supported
+throughout the UI.
 
 ---
 
-# 28. CAN ANALYZER
+# 16. CAN BUS VISUALIZATION
 
-The CAN analyzer is a core product feature.
+Reuse the existing React Flow topology editor.
 
-Display:
+The user should be able to build:
 
 ```text
-TIME       NODE       ID       DLC       DATA
-
-0.001ms    ECU        0x100    8         01 02 03 04 05 06 07 08
-0.102ms    BMS        0x180    8         FF 00 00 01 00 00 00 00
-0.205ms    DASH       0x200    4         20 01 00 00
+┌────────────────┐
+│ Arduino Sender │
+└───────┬────────┘
+        │
+        │
+════════╪══════════
+     CAN BUS
+════════╪══════════
+        │
+        │
+┌───────┴────────┐
+│ Arduino RX     │
+└────────────────┘
 ```
 
-Support:
+The existing topology editor should remain intact.
 
-* sorting
-* filtering
-* pause capture
-* clear
-* export
-* search
-* frame selection
-* TX/RX indication
-* sender
-* timestamp
-
----
-
-# 29. FRAME INSPECTOR
-
-Clicking a frame should show:
+Add runtime indicators:
 
 ```text
-CAN FRAME
+Arduino Sender
+    ● TX
 
-ID
-0x180
-
-Decimal
-384
-
-Format
-Standard
-
-DLC
-8
-
-Data
-FF 00 00 01 00 00 00 00
-
-Sender
-BMS
-
-Timestamp
-102.4 μs
-
-Bitrate
-500 kbit/s
-```
-
-Eventually support bit-level decoding.
-
----
-
-# 30. LIVE TRAFFIC INDICATORS
-
-The canvas should optionally indicate CAN traffic.
-
-Example:
-
-```text
-STM32
-   │
-   ├──── TX ●
-   │
 CAN BUS
-   │
-   └──── RX ●
+    ● traffic
+
+Arduino Receiver
+    ● RX
 ```
 
-Use subtle animation.
-
-Do not make the UI visually noisy.
-
-Allow traffic animation to be disabled.
+Reuse the existing analyzer/event stream rather than creating a parallel traffic system.
 
 ---
 
-# 31. CAN FILTERS
+# 17. REAL FIRMWARE TEST
 
-Provide filters:
+Create two actual Arduino firmware fixtures.
+
+### Sender
+
+Use the existing `mcp_can_sender.ino` concept.
+
+It should send:
 
 ```text
-ID:
-[0x100]
-
-Mask:
-[0x7FF]
-
-Node:
-[All]
-
-Direction:
-[TX/RX]
-
-Frame:
-[All]
+ID 0x100
+DLC 8
 ```
 
-Support:
+and dynamically change at least one byte:
 
-* exact ID
-* range
-* mask
-* sender
-* receiver
-* frame type
+```cpp
+engineData[0] = counter++;
+```
 
----
+### Receiver
 
-# 32. LOGGING
+Create a real Arduino Uno + MCP2515 receiving firmware.
 
-Provide structured logs.
+It should receive frames and expose observable state through something such as:
 
-Categories:
+- UART
+- firmware log
+- receiver counter
+- received CAN frame
 
-* simulation
-* MCU
-* CAN
-* backend
-* frontend
-* hardware
+The receiver must interact with the MCP2515 through SPI.
 
-Allow users to inspect logs.
-
-Don't rely exclusively on stdout.
+Do not make the receiver a fake virtual node.
 
 ---
 
-# 33. WAVEFORM VIEW
+# 18. DEFINITIVE END-TO-END ACCEPTANCE TEST
 
-Eventually implement a bit-level CAN waveform viewer.
+This is the most important test in the project.
 
-Show:
+The test must prove:
 
 ```text
-CANH
-───────┐     ┌────────
-       └─────┘
-
-CANL
-───────┘     └────────
-       ┌─────┐
-```
-
-Support:
-
-* zoom
-* pan
-* cursor
-* timestamp
-* bit boundaries
-* decoded fields
-* dominant/recessive state
-
-Overlay:
-
-```text
-SOF
-ARBITRATION
-CONTROL
-DATA
-CRC
-ACK
-EOF
-```
-
----
-
-# 34. ARBITRATION VISUALIZATION
-
-When multiple nodes transmit simultaneously, optionally show:
-
-```text
-Arbitration
-
-ECU       0x300  ──┐
-BMS       0x100  ──┼──► BMS wins
-Dashboard 0x200  ──┘
-
-Winning ID: 0x100
-```
-
-This should be educational as well as diagnostic.
-
----
-
-# 35. FAULT INJECTION
-
-Add a fault-injection system.
-
-Initial UI:
-
-```text
-FAULT INJECTION
-
-Frame faults
-
-[ ] Drop frame
-[ ] Corrupt data
-[ ] CRC error
-[ ] ACK error
-
-Bus faults
-
-[ ] Disconnect CANH
-[ ] Disconnect CANL
-[ ] Force dominant
-[ ] Force recessive
-
-Node faults
-
-[ ] Force bus-off
-[ ] Disable node
-[ ] Add latency
-```
-
-Provide configurable:
-
-* probability
-* duration
-* affected node
-* affected frame
-* affected bus
-
----
-
-# 36. DETERMINISTIC FAULTS
-
-Faults should be reproducible.
-
-For example:
-
-```yaml
-faults:
-  - type: drop_frame
-    node: bms
-    id: 0x180
-    probability: 0.1
-    seed: 12345
-```
-
-This enables repeatable debugging.
-
----
-
-# 37. CAN FD
-
-Do not implement CAN FD in the MVP.
-
-However, design the frame and bus APIs so CAN FD can be added without rewriting everything.
-
-Eventually support:
-
-* up to 64-byte payload
-* FDF
-* BRS
-* ESI
-* separate arbitration/data bit rates
-* CAN FD CRC behavior
-
----
-
-# 38. DBC SUPPORT
-
-After CAN FD/basic stability, implement DBC support.
-
-Allow importing:
-
-```text
-vehicle.dbc
-```
-
-Decode frames.
-
-Example:
-
-```text
-0x180 BMS_STATUS
-
-Battery SOC
-82.4 %
-
-Battery Voltage
-397.2 V
-
-Battery Current
--31.2 A
-
-Temperature
-29 °C
-```
-
-Provide a DBC editor later if practical.
-
----
-
-# 39. SOCKETCAN
-
-Eventually support Linux SocketCAN.
-
-Architecture:
-
-```text
-CanLab
-   │
-   ▼
-SocketCAN
-   │
-   ▼
-vcan0 / can0
-   │
-   ▼
-Linux CAN ecosystem
-```
-
-Allow:
-
-```bash
-candump
-cansend
-```
-
-and other CAN utilities to interact with the simulated network where appropriate.
-
-Do not make Linux SocketCAN a requirement for the core simulator.
-
----
-
-# 40. REAL HARDWARE BRIDGE
-
-Eventually support:
-
-```text
-SIMULATED NODE
-      ↕
-SIMULATED CAN BUS
-      ↕
-SOCKETCAN
-      ↕
-USB CAN ADAPTER
-      ↕
-REAL CAN BUS
-```
-
-This should allow:
-
-```text
-simulated STM32
-        ↕
-simulated CAN
-        ↕
-real Teensy
-```
-
-and potentially:
-
-```text
-real ECU
-   ↕
-real CAN adapter
-   ↕
-CanLab
-   ↕
-simulated ECUs
-```
-
-Make the bridge clearly visible and require explicit user confirmation before transmitting onto physical hardware.
-
----
-
-# 41. SAFETY FOR REAL HARDWARE
-
-Physical CAN transmission is potentially consequential.
-
-The application must:
-
-* clearly distinguish simulation from hardware
-* display the active physical interface
-* require explicit enabling of physical transmission
-* warn users before connecting a simulation to a real bus
-* never silently transmit
-* provide a prominent disconnect control
-* prevent accidental project startup from transmitting unless explicitly configured
-
-Example:
-
-```text
-⚠ REAL HARDWARE ENABLED
-
-Interface:
-can0
-
-Bitrate:
-500 kbit/s
-
-CanLab is connected to a physical CAN network.
-
-[Disconnect]
-```
-
----
-
-# 42. TESTING
-
-Testing is mandatory.
-
-Implement:
-
-### Unit tests
-
-For:
-
-* CAN IDs
-* frames
-* DLC
-* arbitration
-* CRC
-* bit stuffing
-* timing
-* error counters
-* bus states
-* filters
-
-### Integration tests
-
-Test:
-
-```text
-Node A → Bus → Node B
-```
-
-Test:
-
-```text
-STM32 → CAN → STM32
-```
-
-Test:
-
-```text
-Arduino → MCP2515 → CAN → STM32
-```
-
-Eventually:
-
-```text
-STM32 → CAN → Teensy
-```
-
----
-
-# 43. FIRMWARE TEST FIXTURES
-
-Include minimal firmware projects.
-
-Example:
-
-```text
-firmware/tests/stm32_sender
-firmware/tests/stm32_receiver
-firmware/tests/arduino_sender
-firmware/tests/arduino_receiver
-```
-
-The CI system should eventually be able to run these automatically.
-
----
-
-# 44. END-TO-END TEST
-
-Create an automated test:
-
-```text
-Start simulation
-
-Load STM32 sender firmware
-Load STM32 receiver firmware
-
-Connect both to CAN bus
-
-Run simulation
-
-Assert:
-  receiver received ID 0x123
-  payload == expected payload
-  timestamp is valid
-```
-
-Then test arbitration:
-
-```text
-Node A sends 0x300
-Node B sends 0x100
-
-Assert:
-  0x100 transmitted first
-  Node A reports arbitration loss
-```
-
----
-
-# 45. PERFORMANCE
-
-The architecture must not assume every simulation runs in real time.
-
-Support:
-
-* accelerated simulation
-* deterministic simulation
-* headless simulation
-* batch testing
-
-A headless project should be runnable:
-
-```bash
-canlab simulate vehicle.canlab
-```
-
-This should work without opening the GUI.
-
----
-
-# 46. CLI
-
-Provide:
-
-```bash
-canlab
-canlab new
-canlab open project.canlab
-canlab simulate project.canlab
-canlab validate project.canlab
-canlab firmware ...
-canlab doctor
-```
-
-`canlab doctor` should diagnose:
-
-* Renode installation
-* toolchains
-* firmware support
-* permissions
-* SocketCAN
-* hardware adapters
-
-Example:
-
-```text
-CanLab Doctor
-
-✓ Rust
-✓ Node.js
-✓ Renode
-✓ STM32 toolchain
-✓ AVR toolchain
-✗ SocketCAN unavailable
-
-System is ready for simulated CAN networks.
-```
-
----
-
-# 47. IMPORT/EXPORT
-
-Support:
-
-* project save/load
-* CAN trace export
-* CSV
-* JSON
-* PCAP/PCAPNG where practical
-* firmware project references
-* screenshots eventually
-
-Do not embed huge firmware binaries into project files by default.
-
-Use relative paths.
-
----
-
-# 48. PROJECT PORTABILITY
-
-A project should ideally be shareable as:
-
-```text
-my-project/
-├── project.canlab
-├── firmware/
-│   ├── ecu.elf
-│   └── dashboard.hex
-├── dbc/
-│   └── vehicle.dbc
-└── assets/
-```
-
-Provide a packaging/export command eventually:
-
-```bash
-canlab package my-project
-```
-
----
-
-# 49. USER EXPERIENCE
-
-The application should be approachable to someone familiar with Arduino/Tinkercad.
-
-A new user should be able to:
-
-1. create a project
-2. drag STM32 onto canvas
-3. drag Arduino onto canvas
-4. add CAN bus
-5. connect both
-6. select firmware
-7. press Run
-8. open CAN Analyzer
-9. see traffic
-
-Avoid requiring users to understand Renode.
-
-Renode should be an implementation detail.
-
----
-
-# 50. ADVANCED MODE
-
-Provide an advanced/debug mode exposing:
-
-* backend logs
-* Renode console
-* CPU state
-* peripheral registers where available
-* memory
-* CAN controller registers
-* timing
-* bus errors
-* event trace
-
-Do not clutter the beginner UI with this information.
-
----
-
-# 51. DEBUGGING
-
-Eventually support:
-
-* breakpoints
-* pause-on-CAN-frame
-* pause-on-CAN-error
-* register inspection
-* memory inspection
-* firmware logs
-* backend logs
-
-If Renode's debugger can be integrated, expose it through the abstraction.
-
----
-
-# 52. EVENT SYSTEM
-
-Implement an internal event bus.
-
-Events should include concepts such as:
-
-```text
-SimulationStarted
-SimulationPaused
-SimulationStopped
-
-NodeStarted
-NodeStopped
-NodeReset
-
-CanFrameQueued
-CanArbitrationStarted
-CanArbitrationLost
-CanFrameTransmitted
-CanFrameReceived
-CanError
-CanBusOff
-
-FaultInjected
-```
-
-The frontend should consume these events rather than polling everything.
-
----
-
-# 53. OBSERVABILITY
-
-Every CAN event should have a timestamp.
-
-Allow event recording.
-
-Eventually support:
-
-```text
-simulation recording
-        ↓
-save trace
-        ↓
-replay
-```
-
-This is useful for debugging.
-
----
-
-# 54. REPLAY
-
-Eventually allow:
-
-```bash
-canlab replay trace.json
-```
-
-or from the GUI:
-
-```text
-[Replay Recording]
-```
-
-Users should be able to replay CAN traffic deterministically.
-
----
-
-# 55. EXTENSIBILITY
-
-Components should be plugin-like internally even if external plugins aren't supported initially.
-
-A device definition should conceptually specify:
-
-```text
-device ID
-name
-icon
-backend
-interfaces
-configuration schema
-```
-
-For example:
-
-```json
-{
-  "id": "stm32f103",
-  "name": "STM32F103",
-  "interfaces": [
-    {
-      "type": "can",
-      "name": "CAN1"
-    }
-  ]
-}
-```
-
-This makes future MCU support easier.
-
----
-
-# 56. BACKEND-AGNOSTIC DESIGN
-
-The project must never assume:
-
-```text
-STM32 = Renode
-```
-
-Instead:
-
-```text
-STM32
- ├── Renode backend
- ├── future QEMU backend
- └── future native backend
-```
-
-Likewise:
-
-```text
-Teensy
- ├── Renode
- └── future backend
-```
-
----
-
-# 57. DOCUMENTATION
-
-Write documentation continuously.
-
-Include:
-
-```text
-docs/
-├── getting-started.md
-├── architecture.md
-├── can-model.md
-├── mcu-backends.md
-├── firmware.md
-├── projects.md
-├── fault-injection.md
-├── dbc.md
-├── socketcan.md
-└── contributing.md
-```
-
-Explain both:
-
-* how to use CanLab
-* how to develop CanLab
-
----
-
-# 58. OPEN SOURCE
-
-Use a permissive license compatible with dependencies.
-
-Before selecting the final license, inspect the licenses of all dependencies.
-
-Maintain a dependency/license report.
-
-Do not copy code from incompatible projects.
-
-Do not assume that because a simulator is publicly available it can be forked or incorporated wholesale.
-
-Prefer:
-
-* APIs
-* documented interfaces
-* clean-room implementations where necessary
-* compatible open-source dependencies
-
----
-
-# 59. SECURITY
-
-Treat:
-
-* project files
-* firmware
-* backend output
-* hardware interfaces
-
-as potentially unsafe.
-
-Do not execute arbitrary shell commands from firmware/project configuration.
-
-Sandbox external processes where practical.
-
-Provide clear warnings for physical hardware.
-
----
-
-# 60. DEVELOPMENT PHASES
-
-Follow this implementation sequence.
-
-## Phase 0 — Architecture
-
-Deliver:
-
-* repository
-* Rust workspace
-* frontend shell
-* project format
-* architecture documentation
-* CI
-
-Do not build the complete GUI yet.
-
----
-
-## Phase 1 — CAN Core
-
-Implement:
-
-* frame
-* ID
-* bus
-* nodes
-* arbitration
-* timestamps
-* basic transmission
-* reception
-
-Create extensive unit tests.
-
-Goal:
-
-```text
-Node A → CAN Bus → Node B
-```
-
----
-
-## Phase 2 — Protocol correctness
-
-Implement:
-
-* CRC
-* bit stuffing
-* ACK
-* error conditions
-* error counters
-* bus states
-* timing
-
-Add protocol tests.
-
----
-
-## Phase 3 — CLI
-
-Create:
-
-```bash
-canlab simulate
-```
-
-Allow a simple project file to run without the GUI.
-
-Goal:
-
-```text
-STM32-like virtual node
+Arduino source
       ↓
-CAN
+real compilation
       ↓
-STM32-like virtual node
-```
-
----
-
-## Phase 4 — Renode
-
-Integrate Renode.
-
-Get real STM32 firmware executing.
-
-Goal:
-
-```text
-real STM32 firmware
-        ↓
-simulated STM32
-        ↓
-CAN
-        ↓
-simulated STM32
-        ↓
-real STM32 firmware
-```
-
-This is the first major success criterion.
-
----
-
-## Phase 5 — GUI
-
-Implement:
-
-* canvas
-* components
-* connections
-* project loading
-* simulation controls
-
-Do not overdesign.
-
----
-
-## Phase 6 — CAN Analyzer
-
-Implement:
-
-* live frames
-* filters
-* frame inspection
-* timestamps
-* export
-
-This should become one of the strongest parts of the application.
-
----
-
-## Phase 7 — Arduino/MCP2515
-
-Implement:
-
-```text
-ATmega328P
-    ↓
-SPI
-    ↓
-MCP2515
-    ↓
-CAN
-```
-
-Run real Arduino firmware.
-
----
-
-## Phase 8 — Teensy
-
-Implement:
-
-```text
-i.MX RT1062
-    ↓
-FlexCAN
-    ↓
-CAN
-```
-
-Run real Teensy firmware if the selected backend supports the necessary hardware.
-
-If Renode does not adequately support the exact target, do NOT distort the architecture to force it.
-
-Instead create a backend/device implementation plan.
-
----
-
-## Phase 9 — Fault Injection
-
-Add:
-
-* dropped frames
-* corrupted frames
-* ACK errors
-* CRC errors
-* bus-off
-* node failure
-* timing faults
-
----
-
-## Phase 10 — Waveforms
-
-Add bit-level visualization.
-
----
-
-## Phase 11 — CAN FD
-
-Add Classical CAN-compatible extension architecture.
-
----
-
-## Phase 12 — DBC
-
-Add:
-
-* import
-* decoding
-* signal visualization
-
----
-
-## Phase 13 — SocketCAN
-
-Add:
-
-* virtual CAN
-* Linux CAN integration
-* CAN trace integration
-
----
-
-## Phase 14 — Physical CAN
-
-Add:
-
-* USB CAN adapters
-* hardware safety confirmation
-* real/simulated mixed networks
-
----
-
-# 61. MVP DEFINITION
-
-Do NOT call the project MVP complete until all of these work:
-
-### UI
-
-* create project
-* add STM32
-* add Arduino
-* add CAN bus
-* connect nodes
-* save project
-* load project
-
-### Firmware
-
-* load STM32 firmware
-* load Arduino firmware
-
-### Simulation
-
-* run/pause/stop/reset
-* real firmware execution
-
-### CAN
-
-* standard frames
-* 11-bit IDs
-* 8-byte payload
-* arbitration
-* RX/TX
-* timestamps
-* basic errors
-
-### Analyzer
-
-* live traffic
-* ID
-* DLC
-* payload
-* sender
-* timestamp
-* filtering
-
-### Backend
-
-* Renode integration
-* clean startup/shutdown
-* useful errors
-
----
-
-# 62. DO NOT IMPLEMENT YET
-
-Explicitly defer:
-
-* full SPICE
-* PCB simulation
-* every Arduino board
-* every STM32
-* every Teensy
-* CAN FD before Classical CAN is stable
-* physical CAN voltage simulation
-* complete analog transceiver models
-* full automotive network stack
-* UDS
-* J1939
-* AUTOSAR
-* graphical DBC editor
-* cloud collaboration
-
-These may be future features.
-
----
-
-# 63. FUTURE AUTOMOTIVE FEATURES
-
-Architect so these could eventually be added:
-
-* UDS
-* ISO-TP
-* J1939
-* CANopen
-* LIN
-* FlexRay
-* SOME/IP
-* automotive Ethernet
-* DBC
-* ARXML
-
-Do not implement them in the MVP.
-
----
-
-# 64. IMPORTANT ARCHITECTURAL DISTINCTION
-
-Maintain three levels:
-
-```text
-Level 1
-CAN FRAME
-
-ID / DLC / DATA
-```
-
-```text
-Level 2
-CAN CONTROLLER
-
-bxCAN
-FlexCAN
-MCP2515
-```
-
-```text
-Level 3
-PHYSICAL LAYER
-
-CAN transceiver
-CANH
-CANL
-termination
-```
-
-Do not collapse these layers.
-
-This is essential for future realism.
-
----
-
-# 65. PHYSICAL-LAYER FUTURE
-
-Eventually allow:
-
-```text
-MCU
- ↓
-CAN controller
- ↓
-transceiver
- ↓
-CANH/CANL
- ↓
-termination
-```
-
-The initial CAN bus may operate at the logical frame/controller level.
-
-Later introduce electrical behavior.
-
-Do not make physical-layer simulation a requirement for basic CAN simulation.
-
----
-
-# 66. PERFORMANCE ARCHITECTURE
-
-Use asynchronous event processing where appropriate.
-
-Avoid:
-
-```text
-frontend polls backend every millisecond
-```
-
-Prefer:
-
-```text
-Simulation
-    ↓
-Event stream
-    ↓
-WebSocket
-    ↓
-Frontend
-```
-
-Throttle UI rendering separately from simulation frequency.
-
-The simulator must be capable of generating more events than the UI can render without becoming unstable.
-
----
-
-# 67. LARGE TRAFFIC HANDLING
-
-The analyzer must not store unlimited frames in memory.
-
-Implement:
-
-* ring buffers
-* configurable capture limits
-* disk-backed recording eventually
-* filtering before rendering
-
-The UI should remain responsive during high CAN traffic.
-
----
-
-# 68. ERROR MESSAGES
-
-Errors should be actionable.
-
-Bad:
-
-```text
-Backend error.
-```
-
-Good:
-
-```text
-Could not start STM32F103 simulation.
-
-Renode reported that the platform does not expose CAN1.
-
-Device: stm32f103
-Interface: CAN1
-
-Check the selected platform/backend configuration.
-```
-
----
-
-# 69. DESIGN LANGUAGE
-
-The UI should feel:
-
-* technical
-* clean
-* modern
-* lightweight
-* developer-oriented
-
-Do not make it look like a toy.
-
-But it should still be approachable to Arduino users.
-
-Use a clear visual distinction between:
-
-* components
-* connections
-* active simulation
-* CAN traffic
-* errors
-* physical hardware
-
----
-
-# 70. ACCESSIBILITY
-
-Support:
-
-* keyboard navigation
-* readable contrast
-* scalable UI
-* tooltips
-* screen-reader-friendly controls where applicable
-* non-color-only status indicators
-
----
-
-# 71. CI/CD
-
-Set up CI for:
-
-* Rust formatting
-* Rust linting
-* unit tests
-* frontend type checking
-* frontend tests
-* project schema validation
-
-Eventually add integration CI for supported emulator environments.
-
-Do not make Renode integration tests impossible to run locally.
-
----
-
-# 72. DEVELOPMENT QUALITY
-
-Do not produce a giant untested implementation.
-
-Implement incrementally.
-
-After each major subsystem:
-
-1. write tests
-2. run tests
-3. document behavior
-4. commit logically
-5. verify integration
-
-Avoid placeholder implementations that silently pretend to work.
-
-If something isn't implemented, expose an explicit error.
-
-For example:
-
-```text
-Teensy 4.1 is recognized but its current backend does not support FlexCAN simulation.
-```
-
-Do NOT silently emulate it as an STM32.
-
----
-
-# 73. IMPLEMENTATION STRATEGY FOR AI CODING AGENTS
-
-When implementing this project:
-
-1. Inspect the existing repository before changing anything.
-2. Preserve existing working code.
-3. Do not rewrite large portions without justification.
-4. Create tests before complicated protocol implementations.
-5. Prefer small modules.
-6. Keep public interfaces documented.
-7. Avoid unnecessary dependencies.
-8. Explain architectural decisions in code comments where non-obvious.
-9. Never claim a feature works without testing it.
-10. Never substitute a fake implementation for real MCU behavior without clearly labeling it.
-
-If the repository already contains code, adapt this architecture to the existing project rather than blindly replacing it.
-
----
-
-# 74. FIRST IMPLEMENTATION TASK
-
-Start by implementing only:
-
-```text
-CanFrame
-CanId
-CanNode
-CanBus
-arbitration
-simulation clock
-```
-
-Then create tests.
-
-Required test:
-
-```text
-Node A → 0x300
-Node B → 0x100
-Node C → 0x200
-
-Expected:
-
-B wins arbitration.
-A and C lose arbitration.
-```
-
-Required second test:
-
-```text
-Node A transmits:
-
-ID: 0x123
-DLC: 8
-DATA:
-01 02 03 04 05 06 07 08
-
-Node B must receive exactly that frame.
-```
-
-Required third test:
-
-```text
-Node A transmits
-Node B receives
-Node C receives
-
-All eligible nodes observe the winning frame.
-```
-
-Do not start the graphical UI until these tests pass.
-
----
-
-# 75. SECOND IMPLEMENTATION TASK
-
-Implement the CLI:
-
-```bash
-canlab simulate example.canlab
-```
-
-It should print:
-
-```text
-Starting CanLab...
-
-Bus:
-  vehicle_bus
-  bitrate: 500000
-
-Nodes:
-  engine_ecu
-  dashboard
-
-Simulation started.
-
-[0.001 ms] engine_ecu TX 0x123 [01 02 03 04]
-[0.001 ms] dashboard RX 0x123 [01 02 03 04]
-```
-
----
-
-# 76. THIRD IMPLEMENTATION TASK
-
-Integrate Renode.
-
-Create the smallest possible working example:
-
-```text
-STM32F103 firmware A
-        ↓
-simulated CAN
-        ↓
-STM32F103 firmware B
-```
-
-Use actual firmware.
-
-Do not fake the firmware API.
-
----
-
-# 77. SUCCESS CRITERIA
-
-The project is successful when a user can download CanLab, open it, create:
-
-```text
-STM32 ───── CAN BUS ───── Arduino
-```
-
-load real firmware into both devices, press:
-
-```text
-▶ Run
-```
-
-and observe actual CAN frames in:
-
-```text
+real AVR firmware execution
+      ↓
+real SPI interaction
+      ↓
+real MCP2515 model
+      ↓
+virtual CAN bus
+      ↓
+second real emulated node
+      ↓
 CAN Analyzer
 ```
 
-without needing to know that Renode is being used internally.
+Procedure:
 
-The next major milestone is:
+1. Import the sender Arduino project.
+2. Import the receiver Arduino project.
+3. Select Arduino Uno for both.
+4. Select MCP2515 CAN controller.
+5. Attach both to the same virtual CAN bus.
+6. Compile both projects.
+7. Start simulation.
+8. Run both firmware images.
+9. Observe sender TX frames.
+10. Observe receiver RX frames.
+11. Verify ID `0x100`.
+12. Verify DLC.
+13. Verify payload.
+14. Verify timestamps.
+15. Verify the dynamically incrementing counter byte changes across transmissions.
 
-```text
-STM32 ───── CAN ───── Arduino ───── CAN ───── Teensy
-```
-
-with all three using their respective real CAN-controller interfaces.
-
-The long-term goal is:
-
-```text
-                 CANLAB
-
-      ┌──────── simulated ────────┐
-      │                            │
-   STM32                         Teensy
-      │                            │
-      └────────── CAN BUS ─────────┘
-                   │
-                   │
-              SocketCAN
-                   │
-                   ▼
-              REAL CAN BUS
-                   │
-             ┌─────┴─────┐
-             ▼           ▼
-          real ECU    real Teensy
-```
-
-That is the ultimate product direction.
+The test must fail if the implementation is merely reading the source and generating scripted messages.
 
 ---
 
-# 78. FINAL ENGINEERING RULE
+# 19. SECOND ACCEPTANCE TEST: ARBITRATION
 
-**Do not optimize for "how quickly can I make something that looks like Tinkercad."**
+Create two real firmware nodes that attempt to transmit at the same simulation instant:
 
-Optimize for:
+```text
+Arduino A → 0x300
+Arduino B → 0x100
+```
 
-> **How quickly can I prove that real embedded firmware from different MCU families can communicate over a correctly modeled virtual CAN network?**
+The existing CAN core should determine:
 
-Once that works, the visual editor is an interface on top of a genuinely useful simulation engine.
+```text
+0x100 wins arbitration
+0x300 loses arbitration
+```
 
-The CAN engine should remain usable independently of the GUI.
+The firmware should experience the result through its simulated CAN controller.
 
-The MCU abstraction should remain independent of Renode.
+The backend must not simply report a precomputed scripted winner.
 
-The project format should remain independent of the frontend.
+---
 
-The physical CAN layer should remain independent of the logical CAN layer.
+# 20. THIRD ACCEPTANCE TEST: RUNTIME DEPENDENCY
 
-And every future feature should fit into those boundaries rather than breaking them.
+The Arduino firmware must demonstrate behavior that cannot be determined through static parsing.
+
+Example:
+
+```cpp
+counter++;
+```
+
+The analyzer should eventually show:
+
+```text
+0x100 ... 00 ...
+0x100 ... 01 ...
+0x100 ... 02 ...
+0x100 ... 03 ...
+```
+
+or an equivalent observable runtime progression.
+
+This is a required proof that firmware is actually executing.
+
+---
+
+# 21. PRESERVE SCRIPTED TRAFFIC
+
+Do not remove the current scripted-message feature.
+
+It is still useful for:
+
+- protocol tests
+- quick CAN experimentation
+- regression tests
+- users who do not have firmware
+- deterministic traffic generation
+- arbitration demonstrations
+- fault testing
+
+Clearly distinguish:
+
+```text
+Scripted simulation
+```
+
+from:
+
+```text
+Firmware simulation
+```
+
+The UI should make the distinction obvious.
+
+For example:
+
+```text
+Execution mode:
+● Firmware
+○ Scripted CAN
+```
+
+---
+
+# 22. PRESERVE STATIC SKETCH IMPORT
+
+The existing sketch parser remains useful.
+
+Keep:
+
+```bash
+canlab sketch ...
+```
+
+It should remain available for:
+
+- source inspection
+- library detection
+- preview
+- diagnostics
+- future dependency discovery
+
+But change the GUI wording so users do not mistake it for firmware execution.
+
+Do not display:
+
+```text
+Sketch import
+```
+
+as though it loads executable firmware when it only extracts CAN intent.
+
+---
+
+# 23. BACKEND CAPABILITY MODEL
+
+Introduce backend capability reporting.
+
+For example:
+
+```text
+Device: arduino_uno
+
+Backend:
+  AVR emulator
+
+Capabilities:
+  ✓ firmware execution
+  ✓ SPI
+  ✓ MCP2515
+  ✓ Classical CAN
+  ✓ UART
+  ✗ CAN FD
+```
+
+The UI should ask the backend what it supports.
+
+Do not hard-code capability assumptions throughout React.
+
+---
+
+# 24. ERROR HANDLING
+
+Every unsupported path must fail explicitly.
+
+Examples:
+
+```text
+Arduino Uno firmware execution is unavailable because
+the AVR backend is not installed.
+```
+
+```text
+The selected sketch requires library MCP_CAN,
+but the library is unavailable to the compiler.
+```
+
+```text
+The selected board is recognized but no emulator
+backend exists for it yet.
+```
+
+```text
+MCP2515 initialization used an unsupported register
+operation at SPI command 0xXX.
+```
+
+Never silently turn unsupported firmware into:
+
+```text
+virtual scripted traffic
+```
+
+That would hide failures and make simulation results misleading.
+
+---
+
+# 25. PHYSICAL HARDWARE MUST NOT BE REQUIRED
+
+The first implementation must operate entirely in software.
+
+No:
+
+- Arduino USB connection
+- CAN adapter
+- real CAN transceiver
+- SocketCAN
+- vcan interface
+- physical endpoint
+
+should be required for the core workflow.
+
+The topology should be:
+
+```text
+          SOFTWARE ONLY
+
+ Arduino Emulator
+       │
+       ▼
+    MCP2515
+       │
+       ▼
+ Virtual CAN Bus
+       │
+       ▼
+ Arduino Emulator
+       │
+       ▼
+ CAN Analyzer
+```
+
+SocketCAN and real CAN hardware remain future features.
+
+---
+
+# 26. SECURITY
+
+Firmware and uploaded project files are untrusted inputs.
+
+Do not execute arbitrary project-provided shell scripts.
+
+Do not execute:
+
+```text
+./build.sh
+make whatever
+custom_project_command
+```
+
+merely because a project contains such a file.
+
+Compilation should happen through a controlled configured toolchain interface.
+
+Use temporary workspaces.
+
+Prevent:
+
+- path traversal
+- writing arbitrary files outside the workspace
+- arbitrary command execution through project metadata
+- unbounded file sizes
+- unbounded compiler output
+
+Clean up temporary firmware workspaces.
+
+---
+
+# 27. PERFORMANCE
+
+Do not make the frontend dictate emulator timing.
+
+The model should remain:
+
+```text
+Firmware/Emulator
+      ↓
+Simulation events
+      ↓
+WebSocket
+      ↓
+Frontend rendering
+```
+
+The UI may throttle rendering.
+
+The simulation must not be throttled to the browser's frame rate.
+
+The analyzer should continue using bounded capture storage/ring-buffer behavior.
+
+---
+
+# 28. EXISTING RENODE WORK
+
+Do not delete the existing Renode implementation.
+
+Keep:
+
+```text
+STM32F103
+    ↓
+Renode
+    ↓
+CAN
+```
+
+working.
+
+Refactor where necessary so Arduino and STM32 share the same backend abstraction.
+
+The architecture should become:
+
+```text
+                McuBackend
+                  │
+          ┌───────┴────────┐
+          │                │
+        Renode         AVR backend
+          │                │
+       STM32F103       ATmega328P
+          │                │
+       bxCAN           SPI/MCP2515
+          │                │
+          └──────┬─────────┘
+                 │
+              CanBus
+```
+
+Do not make the CAN core know which emulator is running.
+
+---
+
+# 29. PROJECT ARCHITECTURE
+
+Maintain the existing layering:
+
+```text
+Frontend
+    ↓
+Application/WebSocket API
+    ↓
+Firmware/project management
+    ↓
+MCU execution backend
+    ↓
+Controller/peripheral model
+    ↓
+CAN core
+    ↓
+Future physical CAN layer
+```
+
+Do not collapse:
+
+```text
+MCU
+CAN controller
+CAN bus
+physical transceiver
+```
+
+into one object.
+
+---
+
+# 30. IMPLEMENTATION ORDER
+
+Implement this incrementally.
+
+## Step 1 — Baseline
+
+Inspect and run the existing test suite.
+
+Verify:
+
+```bash
+cargo test
+```
+
+and:
+
+```bash
+cd frontend
+npm install
+npm run typecheck
+npm run build
+```
+
+Fix baseline build/environment issues before changing architecture.
+
+Do not assume the repository is healthy without testing it.
+
+---
+
+## Step 2 — Firmware workspace import
+
+Implement:
+
+```text
+Arduino project directory
+        ↓
+Frontend file selection
+        ↓
+Backend workspace
+        ↓
+safe project representation
+```
+
+Test multiple `.ino/.cpp/.h` files.
+
+---
+
+## Step 3 — Arduino toolchain service
+
+Implement:
+
+```text
+FirmwareProject
+    ↓
+BuildService
+    ↓
+Arduino CLI/toolchain
+    ↓
+ELF/HEX
+```
+
+Add unit/integration tests for:
+
+- successful compile
+- missing compiler
+- invalid source
+- missing library
+- unsupported board
+
+---
+
+## Step 4 — AVR emulator proof
+
+Before building the whole UI, prove:
+
+```text
+ATmega328P ELF
+       ↓
+AVR emulator
+       ↓
+CPU executes instructions
+       ↓
+observable firmware behavior
+```
+
+Create the smallest firmware fixture possible.
+
+---
+
+## Step 5 — SPI proof
+
+Prove:
+
+```text
+ATmega328P firmware
+       ↓
+SPI write
+       ↓
+MCP2515 model
+```
+
+with register-level tests.
+
+---
+
+## Step 6 — MCP2515 TX
+
+Prove:
+
+```text
+Arduino firmware
+       ↓
+mcp_can library
+       ↓
+SPI
+       ↓
+MCP2515
+       ↓
+CanBus
+       ↓
+CAN frame
+```
+
+No physical hardware.
+
+No scripted-message substitution.
+
+---
+
+## Step 7 — MCP2515 RX
+
+Add actual receive behavior:
+
+```text
+CanBus
+   ↓
+MCP2515 RX buffer
+   ↓
+SPI
+   ↓
+Arduino firmware
+```
+
+---
+
+## Step 8 — Two-node execution
+
+Run two actual Arduino firmware images against one virtual CAN bus.
+
+Test:
+
+```text
+Arduino TX
+    ↓
+CAN BUS
+    ↓
+Arduino RX
+```
+
+---
+
+## Step 9 — Live event stream
+
+Expose actual emulator/controller events through the existing WebSocket event system.
+
+Do not wait for job completion before displaying traffic.
+
+---
+
+## Step 10 — GUI firmware workflow
+
+Implement:
+
+```text
+Import Project
+    ↓
+Select Board
+    ↓
+Compile
+    ↓
+Create/attach firmware node
+    ↓
+Run
+    ↓
+Live analyzer
+```
+
+---
+
+## Step 11 — End-to-end acceptance
+
+Run the exact acceptance tests in this prompt.
+
+Only call the milestone complete after they pass.
+
+---
+
+# 31. DO NOT IMPLEMENT YET
+
+Do not distract the implementation with:
+
+- Teensy execution
+- every Arduino board
+- CAN FD
+- physical CAN voltage simulation
+- SPICE
+- PCB simulation
+- SocketCAN
+- USB CAN adapters
+- cloud compilation
+- cloud collaboration
+- graphical DBC editor
+- UDS
+- AUTOSAR
+- J1939
+- automotive Ethernet
+
+The current milestone is:
+
+```text
+Arduino Uno
++
+ATmega328P
++
+MCP2515
++
+real compiled firmware
++
+virtual CAN bus
++
+live CAN analyzer
+```
+
+---
+
+# 32. DEFINITION OF DONE FOR THIS MILESTONE
+
+The milestone is complete only when a new user can do this:
+
+```text
+Open CanLab
+      ↓
+Import Arduino project
+      ↓
+Select Arduino Uno
+      ↓
+Compile
+      ↓
+Build succeeds
+      ↓
+Place Arduino node
+      ↓
+Attach to virtual CAN bus
+      ↓
+Press Run
+      ↓
+Actual firmware executes
+      ↓
+MCP2515 communicates over simulated SPI
+      ↓
+CAN frame reaches virtual CAN bus
+      ↓
+CAN Analyzer shows the frame
+```
+
+And, critically:
+
+```text
+No physical Arduino.
+No physical CAN adapter.
+No physical CAN endpoint.
+```
+
+The dynamic behavior must also prove that the firmware was actually executed.
+
+For the existing sender fixture:
+
+```cpp
+engineData[0] = counter++;
+```
+
+the simulator must observe changing payload bytes over successive transmissions.
+
+A solution that produces the expected CAN frames by parsing the source is **not acceptable**.
+
+A solution that replaces Arduino firmware with `MessageDecl` rows is **not acceptable**.
+
+A solution that silently runs Arduino firmware as an STM32 is **not acceptable**.
+
+A solution that runs firmware after the simulation and merely imports a finished trace is **not the desired interactive execution model**.
+
+The goal is:
+
+> **Compile and execute real Arduino firmware against a real virtual CAN network inside CanLab, so the user can develop and test CAN firmware without a single piece of physical CAN hardware.**
+
+That is the next major product milestone.
+
+---
+
+# 33. ENGINEERING RULE
+
+Do not optimize for adding more UI features.
+
+Optimize for proving this path:
+
+```text
+REAL SOURCE
+    ↓
+REAL COMPILER
+    ↓
+REAL MCU INSTRUCTIONS
+    ↓
+REAL PERIPHERAL INTERACTION
+    ↓
+REAL CAN CONTROLLER MODEL
+    ↓
+CORRECT VIRTUAL CAN BUS
+    ↓
+OBSERVABLE LIVE TRAFFIC
+```
+
+Once that path works, the existing visual editor and analyzer become the interface to a genuinely useful firmware simulator rather than a visual wrapper around scripted CAN traffic.
+
+Preserve the existing CAN core.
+
+Preserve the existing STM32/Renode backend.
+
+Preserve the static sketch parser.
+
+Add the missing execution path cleanly.
+
+Do not rewrite working subsystems merely to make the new feature fit.

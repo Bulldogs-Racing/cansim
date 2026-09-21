@@ -221,6 +221,19 @@ fn dispatch(state: &Arc<Mutex<ServerState>>, text: &str) -> ServerMsg {
                 message: e.to_string(),
             },
         },
+        ClientMsg::ImportSketch {
+            filename: _,
+            content,
+            dialect,
+        } => match crate::sketch::extract_can_intent(&content, dialect.as_deref()) {
+            Ok(intent) => ServerMsg::SketchPreview {
+                detected: intent.detected,
+                sends: intent.sends,
+            },
+            Err(e) => ServerMsg::Error {
+                message: e.to_string(),
+            },
+        },
         ClientMsg::InjectFault {
             sender,
             id,

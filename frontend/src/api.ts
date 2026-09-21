@@ -36,6 +36,7 @@ export type ClientMsg =
   | { type: "AddMessage"; message: MessageDecl }
   | { type: "UpdateMessage"; index: number; message: MessageDecl }
   | { type: "RemoveMessage"; index: number }
+  | { type: "ImportSketch"; filename: string; content: string; dialect?: string | null }
   | { type: "AddFault"; fault: FaultDecl }
   | { type: "UpdateFault"; index: number; fault: FaultDecl }
   | { type: "RemoveFault"; index: number }
@@ -165,6 +166,21 @@ export interface MessageDecl {
   id: number;
   data: number[];
   extended?: boolean;
+  /** Provenance for sketch-imported rows (`"node.ino:12"`); display-only. */
+  source?: string | null;
+}
+
+/** A sketch value: resolved constant or runtime expression (never invented). */
+export type Constness<T> = { Const: T } | { Dynamic: string };
+
+/** One CAN send call-site from a sketch preview. */
+export interface SketchSend {
+  library: string;
+  line: number;
+  id: Constness<number>;
+  extended: Constness<boolean>;
+  dlc: Constness<number>;
+  data: Constness<number>[];
 }
 
 /** One fault policy (mirror of FaultDecl in src/project/schema.rs). */
@@ -227,6 +243,7 @@ export type ServerMsg =
   | { type: "RenodeJob"; job: RenodeJob }
   | { type: "RenodeJobList"; jobs: RenodeJob[] }
   | { type: "RenodeLog"; jobId: number; total: number; lines: UartLine[] }
+  | { type: "SketchPreview"; detected: string[]; sends: SketchSend[] }
   | { type: "FrameBits"; idHex: string; extended: boolean; dlc: number; remote: boolean; regions: BitRegion[]; crcHex: string; stuffBits: number; wireBits: number; wire: string }
   | { type: "DecodedSignals"; idHex: string; message: string; signals: DecodedSignal[] }
   | { type: "TraceImported"; transmitted: number; received: number; nextSeq: number }

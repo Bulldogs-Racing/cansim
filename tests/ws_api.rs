@@ -605,3 +605,28 @@ fn ws_renode_jobs_reject_bad_input_without_emulator() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn ws_import_sketch_previews_sends() {
+    // Stateless: no Load needed.
+    let port = serve_ephemeral(Arc::new(Mutex::new(ServerState::new(1))));
+    let (mut ws, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}")).unwrap();
+
+    let content = "#include <mcp_can.h>\n#define CAN_ID 0x100\nbyte b[2] = {0x01, 0x02};\nvoid loop() { CAN.sendMsgBuf(CAN_ID, 0, 2, b); }\n";
+    let req = serde_json::json!({"type": "ImportSketch", "filename": "node.ino", "content": content}).to_string();
+    let rep = rpc(&mut ws, &req);
+    assert_eq!(rep["type"], "SketchPreview", "{rep}");
+    assert_eq!(rep["detected"], serde_json::json!(["mcp_can"]));
+    let sends = rep["sends"].as_array().unwrap();
+    assert_eq!(sends.len(), 1);
+    assert_eq!(sends[0]["id"], serde_json::json!({"Const": 256}));
+    assert_eq!(sends[0]["line"], 4);
+
+    // Unknown libraries and bad overrides are Error replies.
+    let req = serde_json::json!({"type": "ImportSketch", "filename": "n.ino", "content": "#include <other.h>\n"}).to_string();
+    let err = rpc(&mut ws, &req);
+    assert_eq!(err["type"], "Error");
+    assert!(err["message"].as_str().unwrap().contains("--dialect"));
+    let req = serde_json::json!({"type": "ImportSketch", "filename": "n.ino", "content": "x", "dialect": "toaster"}).to_string();
+    assert_eq!(rpc(&mut ws, &req)["type"], "Error");
+}

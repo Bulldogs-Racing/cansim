@@ -14,6 +14,7 @@ use crate::can::errors::CanErrorKind;
 use crate::project::{FaultDecl, MessageDecl, NodeDecl, Project};
 use crate::simulation::engine::EngineState;
 use crate::simulation::event::{SimEvent, SimEventKind};
+use crate::sketch::SketchSend;
 use serde::{Deserialize, Serialize};
 
 /// Client → server. Every variant gets exactly one [`ServerMsg`] reply
@@ -78,6 +79,17 @@ pub enum ClientMsg {
         id: u32,
         #[serde(default)]
         data: Vec<u8>,
+    },
+    /// Preview CAN sends in an Arduino sketch (static analysis — the
+    /// sketch text rides in the request, nothing is compiled or run).
+    /// `dialect` pins `mcp_can`/`arduino-can`; otherwise `#include`
+    /// lines decide. Replies `SketchPreview` for user review; confirmed
+    /// rows go through the normal `AddMessage` path.
+    ImportSketch {
+        filename: String,
+        content: String,
+        #[serde(default)]
+        dialect: Option<String>,
     },
     /// Drive one deterministically faulted frame now (Phase 9, single-shot).
     /// `fault` is the [`WireFault`] wire shape: `{"FlipBit": offset}`,
@@ -271,6 +283,10 @@ pub enum ServerMsg {
         idHex: String,
         message: String,
         signals: Vec<DecodedSignal>,
+    },
+    SketchPreview {
+        detected: Vec<String>,
+        sends: Vec<SketchSend>,
     },
     FaultInjected {
         error: Option<CanErrorKind>,
@@ -599,6 +615,25 @@ mod tests {
         let json = serde_json::to_value(&rep).unwrap();
         assert_eq!(json["type"], "DecodedSignals");
         assert_eq!(json["signals"][0]["value"], 512.0);
+    }
+
+    #[test]
+    fn import_sketch_round_trip() {
+        let req = ClientMsg::ImportSketch {
+            filename: "node.ino".into(),
+            content: "#include <mcp_can.h>\n".into(),
+            dialect: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["type"], "ImportSketch");
+        assert_eq!(json["filename"], "node.ino");
+        // dialect is optional on the wire.
+        let bare: ClientMsg =
+            serde_json::from_str(r#"{"type":"ImportSketch","filename":"n.ino","content":"x"}"#)
+                .unwrap();
+        assert!(matches!(bare, ClientMsg::ImportSketch { .. }));
+        let back: ClientMsg = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, ClientMsg::ImportSketch { .. }));
     }
 
     #[test]

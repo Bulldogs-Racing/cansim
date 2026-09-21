@@ -31,6 +31,7 @@ import {
   RenodeJob,
   SeqEvent,
   ServerMsg,
+  SketchSend,
   UartLine,
   WireFault,
 } from "./api";
@@ -741,6 +742,32 @@ export default function App(): JSX.Element {
       )}
 
       {connected && flowNodes.length > 0 && (
+        <SketchImportPanel
+          key={`sketch:${nodes.map((n) => n.id).join(",")}`}
+          nodes={nodes}
+          onAdd={(message) => editCmd("AddMessage", { type: "AddMessage", message })}
+          onPreview={async (filename, content, dialect) => {
+            const api = apiRef.current;
+            if (!api) {
+              showError("not connected — press Connect first");
+              return null;
+            }
+            try {
+              const reply = await api.request({ type: "ImportSketch", filename, content, dialect });
+              if (reply.type === "SketchPreview") {
+                return { detected: reply.detected, sends: reply.sends };
+              }
+              showError(reply.type === "Error" ? `ImportSketch: ${reply.message}` : "ImportSketch: unexpected reply");
+              return null;
+            } catch (e) {
+              showError(e instanceof Error ? e.message : String(e));
+              return null;
+            }
+          }}
+        />
+      )}
+
+      {connected && flowNodes.length > 0 && (
         <FaultPoliciesPanel
           key={`faultpolicies:${nodes.map((n) => n.id).join(",")}`}
           faults={faults}
@@ -952,6 +979,166 @@ function WaveformStrip({ wire }: { wire: string }): JSX.Element {
   );
 }
 
+/** Arduino sketch import: pick a .ino/.cpp file, preview its CAN sends
+ *  (dialect auto-detected from #includes, overridable), fill any dynamic
+ *  cells with example bytes, and add rows as ordinary scripted messages
+ *  with sketch provenance. Nothing is compiled or run. */
+function SketchImportPanel({ nodes, onAdd, onPreview }: {
+  nodes: ProjectNode[];
+  onAdd: (message: MessageDecl) => void;
+  onPreview: (filename: string, content: string, dialect: string | null) => Promise<{ detected: string[]; sends: SketchSend[] } | null>;
+}): JSX.Element {
+  const [dialect, setDialect] = useState("");
+  const [preview, setPreview] = useState<{ filename: string; detected: string[]; sends: SketchSend[] } | null>(null);
+  const [added, setAdded] = useState<Set<number>>(new Set());
+  const [panelError, setPanelError] = useState<string | null>(null);
+  const field: React.CSSProperties = { padding: 6, borderRadius: 6, border: "1px solid #374151", background: "#111827", color: "#e5e7eb" };
+  const btn: React.CSSProperties = { padding: "6px 12px", borderRadius: 6, border: "1px solid #374151", background: "#1f2937", color: "#e5e7eb", cursor: "pointer" };
+
+  const pickFile = (file: File | undefined) => {
+    if (!file) return;
+    setPanelError(null);
+    setPreview(null);
+    setAdded(new Set());
+    const reader = new FileReader();
+    reader.onload = () => {
+      void (async () => {
+        const result = await onPreview(file.name, String(reader.result ?? ""), dialect.trim() || null);
+        if (result) setPreview({ filename: file.name, ...result });
+        else setPanelError("preview failed — see the error above");
+      })();
+    };
+    reader.onerror = () => setPanelError(`could not read ${file.name}`);
+    reader.readAsText(file);
+  };
+
+  return (
+    <section aria-label="sketch import" style={{ background: "#0b1220", borderRadius: 12, border: "1px solid #1f2937", padding: 12, marginBottom: 12 }}>
+      <h2 style={{ margin: "0 0 8px", fontSize: 16 }}>Sketch import</h2>
+      <p style={{ margin: "0 0 8px", color: "#9ca3af", fontSize: 13 }}>
+        Static analysis only — the sketch is never compiled or run. Dynamic cells need example bytes before a row can be added.
+      </p>
+      {panelError && <p role="alert" style={{ color: "#fca5a5", margin: "0 0 8px" }}>{panelError}</p>}
+      {preview && (
+        <p style={{ margin: "0 0 8px", color: "#9ca3af", fontSize: 13 }}>
+          {preview.filename}: detected {preview.detected.join(", ") || "(override)"} — {preview.sends.length} send(s).
+        </p>
+      )}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <input aria-label="sketch file" title="Arduino sketch (.ino/.cpp) — content is sent as text, never executed" type="file" accept=".ino,.cpp,.h" style={field} onChange={(e) => pickFile(e.target.files?.[0])} />
+        <input aria-label="dialect override" title="empty = auto-detect from #includes; or mcp_can / arduino-can" placeholder="dialect (auto)" style={{ ...field, width: 160 }} value={dialect} onChange={(e) => setDialect(e.target.value)} />
+      </div>
+      {preview && preview.sends.length > 0 && (
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, marginTop: 8 }}>
+          <thead>
+            <tr style={{ textAlign: "left", color: "#9ca3af" }}>
+              <th>Line</th><th>Lib</th><th>Sender</th><th>ID</th><th>Data (hex, ? = fill)</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {preview.sends.map((s, i) => (
+              <SketchSendRow
+                key={i}
+                send={s}
+                nodes={nodes}
+                filename={preview.filename}
+                added={added.has(i)}
+                onAdd={(m) => {
+                  onAdd(m);
+                  setAdded((prev) => new Set(prev).add(i));
+                }}
+              />
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  );
+}
+
+/** One previewed send: constant cells render static, dynamic cells get
+ *  fill inputs. Add validates everything (hex id/range, hex bytes, ≤8)
+ *  before the row becomes an ordinary scripted message with provenance. */
+function SketchSendRow({ send, nodes, filename, added, onAdd }: {
+  send: SketchSend;
+  nodes: ProjectNode[];
+  filename: string;
+  added: boolean;
+  onAdd: (message: MessageDecl) => void;
+}): JSX.Element {
+  const [sender, setSender] = useState(nodes[0]?.id ?? "");
+  const [idText, setIdText] = useState("Const" in send.id ? `0x${send.id.Const.toString(16).toUpperCase()}` : "");
+  const [byteTexts, setByteTexts] = useState<string[]>(
+    send.data.map((b) => ("Const" in b ? b.Const.toString(16).toUpperCase().padStart(2, "0") : ""))
+  );
+  const [extended, setExtended] = useState("Const" in send.extended ? send.extended.Const : false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const field: React.CSSProperties = { padding: 6, borderRadius: 6, border: "1px solid #374151", background: "#111827", color: "#e5e7eb" };
+  const btn: React.CSSProperties = { padding: "6px 12px", borderRadius: 6, border: "1px solid #374151", background: "#1f2937", color: "#e5e7eb", cursor: "pointer" };
+
+  const submit = () => {
+    setFormError(null);
+    if (!sender) {
+      setFormError("pick a sending node first");
+      return;
+    }
+    const id = Number(idText.trim().toLowerCase().startsWith("0x") ? idText.trim() : `0x${idText.trim()}`);
+    if (!Number.isInteger(id) || id < 0) {
+      setFormError(`"${idText}" is not a hex frame id (fill every dynamic cell first)`);
+      return;
+    }
+    const max = extended ? 0x1fffffff : 0x7ff;
+    if (id > max) {
+      setFormError(`0x${id.toString(16).toUpperCase()} exceeds the ${extended ? "29-bit extended" : "11-bit standard"} range`);
+      return;
+    }
+    const data: number[] = [];
+    for (const text of byteTexts) {
+      const b = Number(`0x${text.trim()}`);
+      if (!Number.isInteger(b) || b < 0 || b > 0xff) {
+        setFormError(`"${text}" is not a hex byte (00–FF)`);
+        return;
+      }
+      data.push(b);
+    }
+    if (data.length > 8) {
+      setFormError("Classical CAN carries at most 8 data bytes");
+      return;
+    }
+    onAdd({ sender, id, data, extended, source: `${filename}:${send.line}` });
+  };
+
+  return (
+    <tr style={{ opacity: added ? 0.55 : 1 }}>
+      <td>{send.line}</td>
+      <td style={{ fontFamily: "monospace" }}>{send.library}</td>
+      <td>
+        <select aria-label="sending node" style={field} value={sender} onChange={(e) => setSender(e.target.value)}>
+          {nodes.length === 0 && <option value="">(add a node first)</option>}
+          {nodes.map((n) => <option key={n.id} value={n.id}>{n.id}</option>)}
+        </select>
+      </td>
+      <td>
+        <input aria-label="frame id in hex" style={{ ...field, width: 80 }} value={idText} onChange={(e) => setIdText(e.target.value)} />
+      </td>
+      <td>
+        <span style={{ display: "inline-flex", gap: 4, flexWrap: "wrap" }}>
+          {byteTexts.map((text, i) => (
+            <input key={i} aria-label={`data byte ${i} in hex`} title={"Const" in send.data[i] ? "resolved constant (editable)" : `dynamic: ${JSON.stringify((send.data[i] as { Dynamic: string }).Dynamic)}`} style={{ ...field, width: 44, borderColor: "Const" in send.data[i] ? "#374151" : "#a16207" }} value={text} onChange={(e) => setByteTexts((prev) => prev.map((t, j) => (j === i ? e.target.value : t)))} />
+          ))}
+          {byteTexts.length === 0 && <span style={{ color: "#9ca3af" }}>(empty)</span>}
+        </span>
+      </td>
+      <td style={{ whiteSpace: "nowrap" }}>
+        <label style={{ fontSize: 12, marginRight: 8 }}>
+          <input type="checkbox" checked={extended} onChange={(e) => setExtended(e.target.checked)} /> ext
+        </label>
+        <button style={btn} onClick={submit}>{added ? "✓ Added" : "Add"}</button>
+      </td>
+    </tr>
+  );
+}
+
 /** Scripted traffic editor: what Run transmits, in order. Add form parses
  *  hex (`0x123` / `01 02`) and reports parse problems inline, before the
  *  server ever sees them; server-side validation is the backstop. */
@@ -1049,7 +1236,7 @@ function MessagesPanel({ messages, nodes, onAdd, onUpdate, onRemove }: {
             {messages.map((m, i) => (
               <tr key={i} style={{ background: editing === i ? "#1e3a8a" : "transparent" }}>
                 <td>{i}</td>
-                <td>{m.sender}</td>
+                <td>{m.sender}{m.source ? <><br /><span title="imported from sketch" style={{ color: "#9ca3af", fontSize: 11 }}>⤴ {m.source}</span></> : null}</td>
                 <td style={{ fontFamily: "monospace" }}>0x{m.id.toString(16).toUpperCase()}{m.extended ? " (ext)" : ""}</td>
                 <td>{m.data.length}</td>
                 <td style={{ fontFamily: "monospace" }}>{m.data.map((b) => b.toString(16).toUpperCase().padStart(2, "0")).join(" ") || "(empty)"}</td>
